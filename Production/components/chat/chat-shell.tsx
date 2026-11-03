@@ -39,6 +39,16 @@ function getSavedModel(value: string | null): AIModel | undefined {
   if (value?.startsWith("nvidia/") || value?.startsWith("mistralai/")) return "nvidia"
 }
 
+function getChatErrorMessage(error: unknown): string {
+  if (
+    error instanceof TypeError ||
+    (error instanceof Error && /\b(?:network error|failed to fetch|load failed)\b/i.test(error.message))
+  ) {
+    return "Could not reach the website chat API. Laptop and web fallbacks run only after Vercel receives your request. Check your connection and deployment, then retry."
+  }
+  return error instanceof Error ? error.message : "An error occurred."
+}
+
 export function ChatShell() {
   const [messages, setMessages] = useState<Message[]>([])
   const [conversations, setConversations] = useState<ChatConversation[]>([])
@@ -266,7 +276,7 @@ export function ChatShell() {
           )
         } else {
           console.error("Error sending message:", e)
-          setError(e instanceof Error ? e.message : "An error occurred")
+          setError(getChatErrorMessage(e))
           setMessages((prev) => prev.filter((msg) => msg.id !== assistantMessage.id))
         }
       } finally {

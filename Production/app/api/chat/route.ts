@@ -639,10 +639,16 @@ async function runChat(
           if (signal.aborted) throw error
           const detail = error instanceof Error ? error.message : "Laptop PDF search failed."
           console.warn("Laptop ASME PDF search was unavailable.", detail)
-          emit({ type: "status", status: `Laptop PDF search is unavailable (${detail}); checking other configured PDF indexes…` })
+          emit({
+            type: "status",
+            status: `Laptop PDFs are currently unreachable (${detail}); automatically checking ASME web research if configured…`,
+          })
         }
       } else {
-        emit({ type: "status", status: "Laptop PDF service is not configured; continuing to ASME web research fallback…" })
+        emit({
+          type: "status",
+          status: "Laptop PDF service is not configured; automatically checking ASME web research if configured…",
+        })
       }
 
       const lexicalPassages = searchAsmeIndex(laptopPassages, searchQuery, 24).filter(
@@ -657,7 +663,10 @@ async function runChat(
     async () => {
       if (!isAsmeRelatedQuestion(webQuery)) return []
       if (!process.env.TAVILY_API_KEY) {
-        emit({ type: "status", status: "ASME web research is not configured; answering only from available PDF evidence." })
+        emit({
+          type: "status",
+          status: "ASME web research is not configured; continuing without web sources and clearly flagging any unverified Code details.",
+        })
         return []
       }
       emit({

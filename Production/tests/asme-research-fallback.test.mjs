@@ -22,16 +22,23 @@ test("searches the PDF source before making ASME web research available", async 
 })
 
 test("keeps web research available when the laptop PDF service is unavailable", async () => {
+  const webCalls = []
   const result = await retrievePdfFirstResearch(
     async () => {
       throw new Error("Laptop service offline.")
     },
-    async () => [{ title: "ASME paper", url: "https://example.com", content: "Research" }],
+    async () => {
+      webCalls.push("web")
+      return [{ title: "ASME paper", url: "https://example.com", content: "Research" }]
+    },
+    (pdfEvidence, unavailable) =>
+      shouldSearchAsmeWebFallback("Explain ASME Section VIII Division 2 plastic collapse", pdfEvidence, unavailable),
   )
 
   assert.equal(result.pdfUnavailable, true)
   assert.match(String(result.pdfError), /Laptop service offline/)
   assert.equal(result.pdfEvidence.length, 0)
+  assert.deepEqual(webCalls, ["web"])
   assert.equal(result.webResearch.length, 1)
 })
 
