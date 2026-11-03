@@ -30,7 +30,7 @@ export const AI_MODELS: { id: AIModel; name: string; icon?: string }[] = [
   { id: "auto", name: "Auto" },
   { id: "google", name: "Gemini", icon: "/images/google.webp" },
   { id: "anthropic", name: "Claude", icon: "/images/claude.svg" },
-  { id: "openai", name: "GPT-4o", icon: "/images/gpt.png" },
+  { id: "openai", name: "GPT", icon: "/images/gpt.png" },
   { id: "groq", name: "Groq" },
   { id: "nvidia", name: "NVIDIA" },
 ]
@@ -317,8 +317,8 @@ export function Composer({ onSend, onStop, isStreaming, disabled, selectedModel,
   const currentModel = AI_MODELS.find((m) => m.id === selectedModel) || AI_MODELS[0]
 
   return (
-    <div className={cn("fixed bottom-4 left-0 right-0 px-4 pointer-events-none z-10", desktopSidebarOffset && "md:left-[288px]", hasAnimated && "composer-intro")}>
-      <div className="relative max-w-2xl mx-auto pointer-events-auto">
+    <div className={cn("fixed bottom-0 left-0 right-0 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-6 pointer-events-none z-10 bg-gradient-to-t from-stone-50 via-stone-50/90 to-transparent", desktopSidebarOffset && "md:left-[288px]", hasAnimated && "composer-intro")}>
+      <div className="relative max-w-3xl mx-auto pointer-events-auto">
         <div
           className={cn(
             "flex flex-col gap-3 p-4 bg-white border-stone-200 transition-all duration-200 border-none border-0 overflow-hidden relative rounded-3xl",

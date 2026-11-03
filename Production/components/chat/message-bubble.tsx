@@ -1,10 +1,11 @@
 "use client"
 
+import { useState } from "react"
+import { Check, Copy, FileText, Sparkles, User } from "lucide-react"
+import Image from "next/image"
 import { cn } from "@/lib/utils"
 import type { Message } from "./chat-shell"
-import { User, FileText } from "lucide-react"
 import { MarkdownRenderer } from "./markdown-renderer"
-import Image from "next/image"
 
 interface MessageBubbleProps {
   message: Message
@@ -12,99 +13,89 @@ interface MessageBubbleProps {
   userAvatarUrl?: string
 }
 
-// Format time for display
 function formatTime(date: Date): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 }
 
 export function MessageBubble({ message, isStreaming = false, userAvatarUrl }: MessageBubbleProps) {
   const isUser = message.role === "user"
+  const [copied, setCopied] = useState(false)
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    } catch {
+      /* clipboard blocked: ignore */
+    }
+  }
+
+  if (isUser) {
+    return (
+      <div className="user-message-enter ml-auto flex max-w-[88%] flex-row-reverse items-end gap-2.5 md:max-w-[75%]">
+        <div className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-stone-200 text-stone-600" aria-hidden="true">
+          {userAvatarUrl
+            ? <img src={userAvatarUrl} alt="" className="size-8 rounded-full object-cover" referrerPolicy="no-referrer" />
+            : <User className="size-4" />}
+        </div>
+        <div className="flex flex-col items-end">
+          <div className="rounded-2xl rounded-br-md bg-stone-900 px-4 py-3 text-stone-50 shadow-sm">
+            <div className="flex flex-col gap-2">
+              {message.imageData?.startsWith("data:image/") && (
+                <div className="size-20 overflow-hidden rounded-lg border border-white/20">
+                  <Image src={message.imageData} alt="Uploaded image" width={80} height={80} className="size-full object-cover" />
+                </div>
+              )}
+              {message.attachmentName && (
+                <div className="flex items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-xs text-stone-100">
+                  <FileText className="size-4 shrink-0 text-emerald-300" aria-hidden="true" />
+                  <span className="max-w-52 truncate">{message.attachmentName}</span>
+                </div>
+              )}
+              <p className="whitespace-pre-wrap break-words text-sm leading-6">{message.content}</p>
+            </div>
+          </div>
+          <span className="mt-1 text-[11px] text-stone-400">{formatTime(message.createdAt)}</span>
+        </div>
+      </div>
+    )
+  }
 
   return (
-    <div
-      className={cn(
-        "flex max-w-[90%] md:max-w-[80%] gap-2",
-        isUser
-          ? "ml-auto flex-row-reverse user-message-enter"
-          : "mr-auto animate-in fade-in slide-in-from-bottom-2 duration-300 items-end",
-      )}
-    >
-      {/* Avatar */}
-      <div
-        className={cn(
-          "w-8 h-8 rounded-full flex items-center justify-center shrink-0",
-          "bg-white",
-          !isUser && isStreaming && "sticky bottom-4 self-end transition-all duration-300",
-        )}
-        style={{
-          boxShadow:
-            "rgba(14, 63, 126, 0.04) 0px 0px 0px 1px, rgba(42, 51, 69, 0.04) 0px 1px 1px -0.5px, rgba(42, 51, 70, 0.04) 0px 3px 3px -1.5px, rgba(42, 51, 70, 0.04) 0px 6px 6px -3px, rgba(14, 63, 126, 0.04) 0px 12px 12px -6px, rgba(14, 63, 126, 0.04) 0px 24px 24px -12px",
-        }}
-        aria-hidden="true"
-      >
-        {isUser
-          ? userAvatarUrl
-            ? <img src={userAvatarUrl} alt="" className="size-8 rounded-full object-cover" referrerPolicy="no-referrer" />
-            : <User className="w-4 h-4 text-stone-800" />
-          : <Image src="/asme-interpreter-orb.png" alt="" width={32} height={32} className="size-8 rounded-full object-cover" />}
+    <div className="mr-auto flex w-full gap-3 animate-in fade-in slide-in-from-bottom-2 duration-300">
+      <div className="mt-1 size-8 shrink-0 overflow-hidden rounded-full bg-white shadow-sm ring-1 ring-stone-200" aria-hidden="true">
+        <Image src="/asme-interpreter-orb.png" alt="" width={32} height={32} className="size-8 rounded-full object-cover" />
       </div>
-
-      {/* Message content */}
-      <div className={cn("flex flex-col", isUser ? "items-end" : "items-start")}>
-        {/* Role label (optional, shown on larger screens) */}
-        <span className="text-xs text-stone-400 mb-1 hidden sm:block mt-2">{isUser ? "You" : "Assistant"}</span>
-
-        {/* Bubble */}
-        <div
-          className={cn(
-            "rounded-2xl border-none overflow-hidden",
-            isUser
-              ? "bg-white text-stone-800 border border-stone-200 rounded-br-md"
-              : "bg-transparent text-stone-800 rounded-bl-md",
+      <div className="min-w-0 flex-1">
+        <div className="mb-1 flex items-center gap-2 text-xs">
+          <span className="font-semibold text-stone-800">ASME Interpreter</span>
+          {message.model && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2 py-0.5 text-[11px] font-medium text-stone-500">
+              <Sparkles className="size-3 text-emerald-600" aria-hidden="true" />
+              {message.model}
+              {message.switched ? " · auto-switched" : ""}
+            </span>
           )}
-          style={{
-            boxShadow: isUser
-              ? "rgba(14, 63, 126, 0.04) 0px 0px 0px 1px, rgba(42, 51, 69, 0.04) 0px 1px 1px -0.5px, rgba(42, 51, 70, 0.04) 0px 3px 3px -1.5px, rgba(42, 51, 70, 0.04) 0px 6px 6px -3px, rgba(14, 63, 126, 0.04) 0px 12px 12px -6px, rgba(14, 63, 126, 0.04) 0px 24px 24px -12px"
-              : "none",
-            willChange: isStreaming ? "height" : "auto",
-            transition: "all 0.4s cubic-bezier(0.4, 0, 0.2, 1)",
-          }}
-        >
-          <div
-            className={cn(isUser ? "px-4 py-3" : "py-1")}
-            style={{
-              transition: "max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease",
-            }}
-          >
-            {isUser ? (
-              <div className="flex flex-col gap-2">
-                {message.imageData?.startsWith("data:image/") && (
-                  <div className="w-20 h-20 rounded-lg overflow-hidden border border-stone-200">
-                    <Image
-                      src={message.imageData || "/placeholder.svg"}
-                      alt="Uploaded image"
-                      width={80}
-                      height={80}
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
-                )}
-                {message.attachmentName && (
-                  <div className="flex items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-600">
-                    <FileText className="h-4 w-4 shrink-0 text-emerald-700" aria-hidden="true" />
-                    <span className="max-w-52 truncate">{message.attachmentName}</span>
-                  </div>
-                )}
-                <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
-              </div>
-            ) : (
-              <MarkdownRenderer content={message.content || " "} isStreaming={isStreaming} />
-            )}
-          </div>
         </div>
-
-        {/* Timestamp */}
-        <span className="text-xs text-stone-400 mt-1">{formatTime(message.createdAt)}</span>
+        <div className="rounded-2xl rounded-tl-md border border-stone-200/80 bg-white px-5 py-4 shadow-[0_1px_2px_rgba(28,25,23,0.04),0_8px_24px_-12px_rgba(28,25,23,0.10)]">
+          <MarkdownRenderer content={message.content || " "} isStreaming={isStreaming} />
+          {isStreaming && <span className="asme-caret ml-0.5 inline-block h-4 w-[2px] translate-y-0.5 bg-emerald-600" aria-hidden="true" />}
+        </div>
+        <div className="mt-1.5 flex items-center gap-3 text-[11px] text-stone-400">
+          <span>{formatTime(message.createdAt)}</span>
+          {!isStreaming && message.content.trim() && (
+            <button
+              type="button"
+              onClick={copy}
+              className={cn("inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 transition hover:bg-stone-100 hover:text-stone-600", copied && "text-emerald-700")}
+              aria-label="Copy answer"
+            >
+              {copied ? <Check className="size-3" aria-hidden="true" /> : <Copy className="size-3" aria-hidden="true" />}
+              {copied ? "Copied" : "Copy"}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )

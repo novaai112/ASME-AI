@@ -18,6 +18,9 @@ export interface Message {
   attachmentData?: string
   attachmentName?: string
   attachmentPageImages?: PdfPageImage[]
+  /** Which AI wrote this answer (e.g. "Claude"); "switched" = failover happened mid-answer. */
+  model?: string
+  switched?: boolean
 }
 
 const LEGACY_STORAGE_KEY = "chat-messages"
@@ -39,14 +42,23 @@ function getSavedModel(value: string | null): AIModel | undefined {
   if (value?.startsWith("nvidia/") || value?.startsWith("mistralai/")) return "nvidia"
 }
 
-function getChatErrorMessage(error: unknown, responseReceived: boolean): string {
-  if (error instanceof TypeError) {
-    const detail = error.message ? ` (${error.message})` : ""
-    return responseReceived
-      ? `The chat response stream was interrupted${detail}. Check the Vercel Function logs and retry.`
-      : `The browser did not receive a response from the chat API${detail}. Check the browser Network panel and Vercel Function logs; PDF and web fallbacks only run after Vercel receives the request.`
-  }
-  return error instanceof Error ? error.message : "An error occurred."
+const MAX_AUTO_RECOVERIES = 4
+
+type StreamItem =
+  | { type: "status"; status?: string }
+  | { type: "text"; text?: string }
+  | { type: "meta"; label?: string; switched?: boolean }
+  | { type: "done"; complete?: boolean; degraded?: boolean }
+  | { type: "error"; error?: string; retryable?: boolean }
+
+const wait = (ms: number, signal: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    signal.addEventListener("abort", () => { clearTimeout(timer); resolve() }, { once: true })
+  })
+
+function friendlyFailure(): string {
+  return "I couldn’t reach the AI service after several automatic attempts. Your question is saved — tap Try again."
 }
 
 export function ChatShell() {
@@ -59,6 +71,8 @@ export function ChatShell() {
   const [userAvatarUrl, setUserAvatarUrl] = useState<string | undefined>()
   const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [activity, setActivity] = useState<string[]>([])
+  const [recovering, setRecovering] = useState(false)
   const [abortController, setAbortController] = useState<AbortController | null>(null)
   const [assistantStatus, setAssistantStatus] = useState("Searching the ASME PDFs…")
   const [selectedModel, setSelectedModel] = useState<AIModel>("auto")
@@ -156,7 +170,8 @@ export function ChatShell() {
 
   // Persist all conversations under the verified Nova user ID.
   useEffect(() => {
-    if (!isLoaded || !storageKey) return
+    // Skip while tokens are streaming in: serialising every conversation 25x/second janks long chats.
+    if (!isLoaded || !storageKey || isStreaming) return
     try {
       localStorage.setItem(storageKey, JSON.stringify(conversations))
       setHistoryNotice(null)
@@ -164,7 +179,7 @@ export function ChatShell() {
       console.error("Failed to save private chat history:", e)
       setHistoryNotice("History could not be saved in this browser.")
     }
-  }, [conversations, isLoaded, storageKey])
+  }, [conversations, isLoaded, storageKey, isStreaming])
 
   const handleModelChange = useCallback((model: AIModel) => {
     setSelectedModel(model)
@@ -203,86 +218,143 @@ export function ChatShell() {
 
       const controller = new AbortController()
       setAbortController(controller)
-      let responseReceived = false
+      setActivity([])
+      setRecovering(false)
 
-      try {
+      const history = [...messages, userMessage].map((m, index, list) => ({
+        role: m.role,
+        content: m.content,
+        attachmentData: index === list.length - 1 ? m.attachmentData ?? m.imageData : undefined,
+        attachmentName: index === list.length - 1 ? m.attachmentName : undefined,
+        attachmentPageImages: index === list.length - 1 ? m.attachmentPageImages : undefined,
+      }))
+
+      let accumulated = ""
+      let finished = false
+      let degraded = false
+      let recoveries = 0
+      let modelLabel: string | undefined
+      let switched = false
+
+      const pushStatus = (status: string) => {
+        setAssistantStatus(status)
+        setActivity((current) => (current.at(-1) === status ? current : [...current, status].slice(-40)))
+      }
+      const flush = () =>
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantMessage.id ? { ...msg, content: accumulated, model: modelLabel, switched } : msg,
+          ),
+        )
+
+      // One streaming pass. Returns normally when the server said "done"; throws on a hard failure.
+      const runPass = async (resume: string): Promise<{ retryable: boolean; message?: string }> => {
         const response = await fetch("/api/chat", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            messages: [...messages, userMessage].map((m, index, history) => ({
-              role: m.role,
-              content: m.content,
-              attachmentData: index === history.length - 1 ? m.attachmentData ?? m.imageData : undefined,
-              attachmentName: index === history.length - 1 ? m.attachmentName : undefined,
-              attachmentPageImages: index === history.length - 1 ? m.attachmentPageImages : undefined,
-            })),
-            model: selectedModel,
-          }),
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: history, model: selectedModel, ...(resume ? { resume } : {}) }),
           signal: controller.signal,
         })
-        responseReceived = true
-
         if (!response.ok) {
           const errData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
-          throw new Error(errData.error || `HTTP error! status: ${response.status}`)
+          // 4xx (auth, validation, too large) will not fix itself; 5xx/429 are worth another go.
+          return { retryable: response.status >= 500 || response.status === 429, message: errData.error || `HTTP ${response.status}` }
         }
-
         const reader = response.body?.getReader()
-        if (!reader) {
-          throw new Error("No response body")
-        }
+        if (!reader) return { retryable: true, message: "No response body" }
 
-        let accumulatedContent = ""
+        let sawEvent = false
         let eventBuffer = ""
+        let softError: { retryable: boolean; message?: string } | undefined
         const decoder = new TextDecoder()
-        const consumeEvent = (event: string) => {
-          const data = event
-            .split(/\r?\n/)
-            .find((line) => line.startsWith("data:"))
-            ?.slice(5)
-            .trim()
-          if (!data) return
-
-          const item = JSON.parse(data) as { type: "status" | "text" | "error"; status?: string; text?: string; error?: string }
-          if (item.type === "status" && item.status) setAssistantStatus(item.status)
-          if (item.type === "text" && item.text) accumulatedContent += item.text
-          if (item.type === "error") throw new Error(item.error || "The assistant could not complete this request.")
+        const consume = (raw: string) => {
+          const data = raw.split(/\r?\n/).find((line) => line.startsWith("data:"))?.slice(5).trim()
+          if (!data) return // heartbeat / comment frame
+          let item: StreamItem
+          try { item = JSON.parse(data) as StreamItem } catch { return }
+          sawEvent = true
+          if (item.type === "status" && item.status) pushStatus(item.status)
+          else if (item.type === "text" && item.text) { accumulated += item.text; setRecovering(false) }
+          else if (item.type === "meta") { modelLabel = item.label ?? modelLabel; switched = switched || Boolean(item.switched) }
+          else if (item.type === "done") { finished = Boolean(item.complete); degraded = Boolean(item.degraded) }
+          else if (item.type === "error") softError = { retryable: item.retryable !== false, message: item.error }
         }
 
-        while (true) {
-          const { done, value } = await reader.read()
-          eventBuffer += decoder.decode(value, { stream: !done })
-          const events = eventBuffer.split(/\r?\n\r?\n/)
-          eventBuffer = events.pop() ?? ""
-
-          for (const event of events) consumeEvent(event)
-          if (done && eventBuffer.trim()) consumeEvent(eventBuffer)
-
-          if (accumulatedContent) {
-            setMessages((prev) =>
-              prev.map((msg) => (msg.id === assistantMessage.id ? { ...msg, content: accumulatedContent } : msg)),
-            )
+        let lastPaint = 0
+        try {
+          while (true) {
+            const { done, value } = await reader.read()
+            eventBuffer += decoder.decode(value, { stream: !done })
+            const events = eventBuffer.split(/\r?\n\r?\n/)
+            eventBuffer = events.pop() ?? ""
+            for (const event of events) consume(event)
+            if (done && eventBuffer.trim()) consume(eventBuffer)
+            const now = performance.now()
+            if (accumulated && (now - lastPaint > 40 || done)) { flush(); lastPaint = now }
+            if (done) break
           }
+        } catch (streamError) {
+          if (controller.signal.aborted) throw streamError
+          // Network blip / platform cut mid-stream: not an error to the user, just resume.
+          flush()
+          return { retryable: true, message: sawEvent ? "stream interrupted" : "no response" }
+        }
+        flush()
+        if (softError) return softError
+        // Stream closed without a "done" event = connection was cut. Resume.
+        if (!finished && !sawEvent) return { retryable: true }
+        return { retryable: !finished }
+      }
 
-          if (done) break
+      try {
+        let lastFailure: string | undefined
+        while (!finished) {
+          const result = await runPass(accumulated)
+          if (finished) break
+          lastFailure = result.message
+          if (!result.retryable) throw new Error(result.message || "The request was rejected.")
+          if (recoveries >= MAX_AUTO_RECOVERIES) break
+          recoveries += 1
+          setRecovering(true)
+          pushStatus(accumulated ? "Connection hiccup — resuming your answer automatically…" : "Reconnecting to the assistant…")
+          await wait(Math.min(900 * 2 ** (recoveries - 1), 6_000), controller.signal)
+          if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError")
+        }
+
+        if (!finished) {
+          // Out of automatic attempts. Keep whatever we have and offer a calm retry (never delete the answer).
+          console.warn("Chat did not finish after automatic recovery:", lastFailure)
+          if (accumulated) {
+            accumulated += "\n\n> *The answer paused before the end. Tap **Continue** to pick up where it stopped.*"
+            flush()
+            setError("paused")
+          } else {
+            setMessages((prev) => prev.filter((msg) => msg.id !== assistantMessage.id))
+            setError(friendlyFailure())
+          }
+        } else if (degraded) {
+          setRecovering(false)
         }
       } catch (e) {
         if (e instanceof Error && e.name === "AbortError") {
           setMessages((prev) =>
             prev.map((msg) =>
-              msg.id === assistantMessage.id ? { ...msg, content: msg.content || "[Cancelled]" } : msg,
+              msg.id === assistantMessage.id ? { ...msg, content: msg.content || "*Stopped.*" } : msg,
             ),
           )
         } else {
           console.error("Error sending message:", e)
-          setError(getChatErrorMessage(e, responseReceived))
-          setMessages((prev) => prev.filter((msg) => msg.id !== assistantMessage.id))
+          if (accumulated) {
+            flush()
+            setError("paused")
+          } else {
+            setMessages((prev) => prev.filter((msg) => msg.id !== assistantMessage.id))
+            setError(e instanceof Error && e.message ? e.message : friendlyFailure())
+          }
         }
       } finally {
         setIsStreaming(false)
+        setRecovering(false)
         setAbortController(null)
       }
     },
@@ -291,6 +363,12 @@ export function ChatShell() {
 
   const retry = useCallback(() => {
     if (messages.length === 0) return
+    if (error === "paused") {
+      // Ask the assistant to carry on from the partial answer already on screen.
+      setError(null)
+      void sendMessage("Continue from exactly where you stopped.")
+      return
+    }
     const lastUserMessage = [...messages].reverse().find((m) => m.role === "user")
     if (lastUserMessage) {
       const index = messages.findIndex((m) => m.id === lastUserMessage.id)
@@ -307,7 +385,7 @@ export function ChatShell() {
         100,
       )
     }
-  }, [messages, sendMessage])
+  }, [messages, sendMessage, error])
 
   const stopStreaming = useCallback(() => {
     if (abortController) {
@@ -366,7 +444,13 @@ export function ChatShell() {
         storageNotice={historyNotice}
       />
       <main className={`relative h-dvh min-h-[480px] transition-[margin] duration-300 ${historyOpen ? "md:ml-[288px]" : "md:ml-0"}`}>
-        <header className="absolute inset-x-0 top-0 z-20 h-16">
+        <header className="absolute inset-x-0 top-0 z-20 h-16 bg-gradient-to-b from-stone-50 via-stone-50/85 to-transparent">
+          <div className="pointer-events-none absolute inset-x-0 top-0 flex h-16 items-center justify-center">
+            <span className="flex items-center gap-2 text-sm font-semibold tracking-tight text-stone-700">
+              <span className="size-2 rounded-full bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.18)]" aria-hidden="true" />
+              ASME Interpreter
+            </span>
+          </div>
           <Button
             ref={historyToggleRef}
             onClick={() => historyOpen ? closeHistory() : setHistoryOpen(true)}
@@ -397,7 +481,10 @@ export function ChatShell() {
           messages={messages}
           isStreaming={isStreaming}
           status={assistantStatus}
+          activity={activity}
+          recovering={recovering}
           error={error}
+          onSuggest={(text) => void sendMessage(text)}
           onRetry={retry}
           isLoaded={isLoaded}
           userAvatarUrl={userAvatarUrl}
@@ -445,6 +532,8 @@ function parseMessages(value: unknown): Message[] {
       content: message.content,
       createdAt: Number.isNaN(createdAt.getTime()) ? new Date() : createdAt,
       attachmentName: typeof message.attachmentName === "string" ? message.attachmentName : undefined,
+      model: typeof message.model === "string" ? message.model : undefined,
+      switched: message.switched === true,
     }]
   })
 }
