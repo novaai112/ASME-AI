@@ -39,12 +39,12 @@ function getSavedModel(value: string | null): AIModel | undefined {
   if (value?.startsWith("nvidia/") || value?.startsWith("mistralai/")) return "nvidia"
 }
 
-function getChatErrorMessage(error: unknown): string {
-  if (
-    error instanceof TypeError ||
-    (error instanceof Error && /\b(?:network error|failed to fetch|load failed)\b/i.test(error.message))
-  ) {
-    return "Could not reach the website chat API. Laptop and web fallbacks run only after Vercel receives your request. Check your connection and deployment, then retry."
+function getChatErrorMessage(error: unknown, responseReceived: boolean): string {
+  if (error instanceof TypeError) {
+    const detail = error.message ? ` (${error.message})` : ""
+    return responseReceived
+      ? `The chat response stream was interrupted${detail}. Check the Vercel Function logs and retry.`
+      : `The browser did not receive a response from the chat API${detail}. Check the browser Network panel and Vercel Function logs; PDF and web fallbacks only run after Vercel receives the request.`
   }
   return error instanceof Error ? error.message : "An error occurred."
 }
@@ -203,6 +203,7 @@ export function ChatShell() {
 
       const controller = new AbortController()
       setAbortController(controller)
+      let responseReceived = false
 
       try {
         const response = await fetch("/api/chat", {
@@ -222,6 +223,7 @@ export function ChatShell() {
           }),
           signal: controller.signal,
         })
+        responseReceived = true
 
         if (!response.ok) {
           const errData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
@@ -276,7 +278,7 @@ export function ChatShell() {
           )
         } else {
           console.error("Error sending message:", e)
-          setError(getChatErrorMessage(e))
+          setError(getChatErrorMessage(e, responseReceived))
           setMessages((prev) => prev.filter((msg) => msg.id !== assistantMessage.id))
         }
       } finally {
