@@ -1,0 +1,57 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+*.pdf
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files
+.env*
+!.env.example
+
+# vercel
+.vercel
+/.data/
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# Laptop folder contains licensed documents, local indexes, dependencies, and secrets.
+/Laptop/*.pdf
+/Laptop/**/*.pdf
+/Laptop/.data/
+/Laptop/.env
+/Laptop/.env.*
+!/Laptop/.env.example
+/Laptop/node_modules/
+/Laptop/npm-debug.log*
+
+# Production app local configuration and generated output.
+/Production/.env
+/Production/.env.*
+!/Production/.env.example
+/Production/node_modules/
+/Production/.next/
+/Production/.data/
+/Production/.vercel/
+/Production/out/
+/Production/build/
+/Production/*.tsbuildinfo
+/Production/next-env.d.ts
+/Production/npm-debug.log*
+
+# Local editor/browser automation state.
+/.playwright-mcp/
