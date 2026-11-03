@@ -598,3 +598,33 @@
 .animate-bounce-subtle {
   animation: bounce-subtle 1s ease-in-out infinite;
 }
+
+
+/* ---------- ASME Interpreter: chat polish ---------- */
+html { -webkit-text-size-adjust: 100%; }
+body { font-feature-settings: "cv11", "ss01"; text-rendering: optimizeLegibility; }
+
+.asme-scroll { scrollbar-width: thin; scrollbar-color: rgb(214 211 209) transparent; overscroll-behavior: contain; }
+.asme-scroll::-webkit-scrollbar { width: 8px; }
+.asme-scroll::-webkit-scrollbar-thumb { background: rgb(214 211 209); border-radius: 999px; }
+
+.asme-shimmer {
+  background: linear-gradient(90deg, rgb(68 64 60) 0%, rgb(68 64 60) 40%, rgb(5 150 105) 50%, rgb(68 64 60) 60%, rgb(68 64 60) 100%);
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: asme-shimmer 2.4s linear infinite;
+}
+@keyframes asme-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+
+.asme-caret { animation: asme-blink 1s steps(2, start) infinite; }
+@keyframes asme-blink { to { visibility: hidden; } }
+
+/* Wide equations / tables scroll instead of breaking the layout */
+.markdown-content .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.25rem 0; }
+.markdown-content table { font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  .asme-shimmer, .asme-caret { animation: none; color: inherit; background: none; }
+}
