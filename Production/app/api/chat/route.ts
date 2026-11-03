@@ -639,9 +639,13 @@ async function runChat(
           if (signal.aborted) throw error
           const detail = error instanceof Error ? error.message : "Laptop PDF search failed."
           console.warn("Laptop ASME PDF search was unavailable.", detail)
+          const status =
+            detail.includes("HTTP 401")
+              ? "The laptop rejected the retrieval token; Vercel's ASME_LAPTOP_RETRIEVAL_TOKEN must match the token loaded by the laptop service."
+              : `Laptop PDFs are currently unreachable (${detail}).`
           emit({
             type: "status",
-            status: `Laptop PDFs are currently unreachable (${detail}); automatically checking ASME web research if configured…`,
+            status: `${status} Automatically checking ASME web research if configured…`,
           })
         }
       } else {
@@ -814,24 +818,43 @@ async function runChat(
         : `Routing this ${taskLabel} through ${getProviderLabel(modelSelection)} first; other configured providers remain available as fallback…`,
   })
   const failures: string[] = []
+  const rejectedKeys = new Map<ProviderId, Set<string>>()
+  const unavailableProviders = new Set<ProviderId>()
+  const modelDeadline = Date.now() + 240_000
   let selectedProvider: { provider: ProviderId; response: Response; model: string; label: string } | undefined
 
   for (const candidate of candidates) {
-    const keys = rotateProviderKeys(candidate.provider)
+    if (unavailableProviders.has(candidate.provider) || Date.now() >= modelDeadline) continue
+    const rejected = rejectedKeys.get(candidate.provider)
+    const keys = rotateProviderKeys(candidate.provider).filter((key) => !rejected?.has(key))
     if (keys.length === 0) continue
 
     for (const [keyIndex, apiKey] of keys.entries()) {
+      const remainingMs = modelDeadline - Date.now()
+      if (remainingMs <= 0) break
+      const attemptTimeout = AbortSignal.timeout(Math.min(60_000, remainingMs))
+      const attemptSignal = AbortSignal.any([signal, attemptTimeout])
       emit({
         type: "status",
         status: `Trying ${candidate.label} (key ${keyIndex + 1} of ${keys.length})…`,
       })
       try {
-        const response = await callProvider(candidate, apiKey, relevantConversation, history, documentContext, webContext, signal)
+        const response = await callProvider(candidate, apiKey, relevantConversation, history, documentContext, webContext, attemptSignal)
         if (!response.ok) {
           await response.body?.cancel()
           const reason = describeProviderFailure(candidate.provider, response.status)
           failures.push(`${candidate.label} key ${keyIndex + 1}: ${reason}`)
           console.error(`${candidate.label} request failed: ${reason}.`)
+          if (response.status === 401 || response.status === 403) {
+            const providerKeys = rejectedKeys.get(candidate.provider) ?? new Set<string>()
+            providerKeys.add(apiKey)
+            rejectedKeys.set(candidate.provider, providerKeys)
+            continue
+          }
+          if (response.status >= 500) {
+            unavailableProviders.add(candidate.provider)
+            break
+          }
           if (response.status !== 401 && response.status !== 402 && response.status !== 403 &&
               response.status !== 408 && response.status !== 429 && response.status < 500) {
             break
@@ -842,10 +865,12 @@ async function runChat(
         break
       } catch (error) {
         if (signal.aborted) throw error
-        const reason = describeRequestFailure(error)
+        const timedOut = attemptTimeout.aborted
+        const reason = timedOut ? "request timed out" : describeRequestFailure(error)
         failures.push(`${candidate.label} key ${keyIndex + 1}: ${reason}`)
         console.error(`${candidate.label} request failed: ${reason}.`)
-        if (reason === "TLS certificate validation failed") break
+        unavailableProviders.add(candidate.provider)
+        break
       }
     }
     if (selectedProvider) break

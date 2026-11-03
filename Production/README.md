@@ -34,6 +34,12 @@ The chat backend first asks the Laptop service for relevant passages. The laptop
 
 The deployed site reaches the Laptop folder only through its configured HTTPS tunnel. The laptop, retrieval service, and tunnel must remain online. A temporary Cloudflare Quick Tunnel URL changes on restart and has no uptime guarantee; use a stable named tunnel/domain for ongoing use. Until the tunnel and Vercel variables are configured and tested against the deployed URL, laptop PDF retrieval is not connected.
 
+## Troubleshooting
+
+- **Laptop retrieval returns HTTP 401:** `ASME_LAPTOP_RETRIEVAL_TOKEN` in Vercel must exactly match `ASME_RETRIEVAL_TOKEN` in the laptop's `.env.local`. After changing the laptop file, restart `npm start`; after changing Vercel variables, redeploy. Do not share either token.
+- **Gemini rejects a key:** replace revoked or incorrectly restricted keys in Vercel. A server-side key must have access to the Gemini API and must not be restricted to browser referrers. Remove stale keys from both the plural key pool and any single-key variables. Keep another provider configured for failover when possible.
+- **Requests taking too long:** provider attempts now have a bounded timeout and a failing provider is skipped for the rest of that request, allowing other configured providers to be tried. If every configured provider rejects its keys or is unavailable, the assistant cannot produce an answer.
+
 ## Validation
 
 ```powershell
