@@ -3,6 +3,7 @@
 # dependencies
 /node_modules
 *.pdf
+/Laptop/
 
 # next.js
 /.next/
