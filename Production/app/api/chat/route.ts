@@ -556,17 +556,25 @@ async function streamProviderText(response: Response, provider: ProviderId, emit
   const decoder = new TextDecoder()
   let buffer = ""
   let emittedText = false
+  let outputLimitReached = false
 
   const consumeLine = (line: string) => {
     if (!line.startsWith("data:")) return
     const data = line.slice(5).trim()
     if (!data || data === "[DONE]") return
     const item = JSON.parse(data) as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
-      choices?: Array<{ delta?: { content?: unknown } }>
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>
+      choices?: Array<{ delta?: { content?: unknown }; finish_reason?: string }>
       type?: string
-      delta?: { type?: string; text?: string }
+      delta?: { type?: string; text?: string; stop_reason?: string | null }
     }
+    const finishReason =
+      provider === "google"
+        ? item.candidates?.[0]?.finishReason
+        : provider === "anthropic"
+          ? item.type === "message_delta" ? item.delta?.stop_reason : undefined
+          : item.choices?.[0]?.finish_reason
+    if (finishReason && /^(?:max_tokens|length)$/i.test(finishReason)) outputLimitReached = true
     const contentToText = (content: unknown): string => {
       if (typeof content === "string") return content
       if (Array.isArray(content)) {
@@ -609,6 +617,12 @@ async function streamProviderText(response: Response, provider: ProviderId, emit
     reader.releaseLock()
   }
   if (!emittedText) throw new Error("The selected model finished without returning a text response.")
+  if (outputLimitReached) {
+    emit({
+      type: "text",
+      text: "\n\n> **Response may be incomplete:** the AI model reached its output limit. Ask “continue from where you stopped” to continue.",
+    })
+  }
 }
 
 async function runChat(
