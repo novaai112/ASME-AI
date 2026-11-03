@@ -6,6 +6,29 @@ const MAX_CHUNK_LENGTH = 5_000
 const MAX_RESPONSE_BYTES = 256 * 1024
 const REQUEST_TIMEOUT_MS = 8_000
 
+export function normalizeAsmeRetrievalQuery(query: string): string {
+  let normalized = query
+    .replace(/\b(?:please|read|search|find|look\s+up|explain|write|sort|summari[sz]e|summary|describe|pdfs?|and)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (
+    /\bpart\s*5\b/i.test(normalized) &&
+    /\b(?:div(?:ision)?\s*2|div2)\b/i.test(normalized) &&
+    !/\bdesign[\s-]*by[\s-]*analysis\b/i.test(normalized)
+  ) {
+    normalized += " design-by-analysis requirements"
+  }
+  return normalized || query.trim()
+}
+
+export function isBroadDivision2Part5Query(query: string): boolean {
+  return (
+    /\bpart\s*5\b/i.test(query) &&
+    /\b(?:div(?:ision)?\s*2|div2)\b/i.test(query) &&
+    !/\b5\.[2-5]\b|plastic[\s-]*collapse|local failure|buckling|fatigue|ratcheting|cyclic loading/i.test(query)
+  )
+}
+
 export interface LaptopAsmeChunk extends AsmeChunk {
   edition: string | null
   clause: string | null

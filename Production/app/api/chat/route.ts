@@ -3,7 +3,11 @@ import { extractUploadedPdf, searchAsmeIndex, type AsmeChunk } from "@/lib/asme-
 import { parseNvidiaDocumentImage, rankPassagesByEmbedding, rerankPassages } from "@/lib/nvidia-ai"
 import { getProviderKeys, type ProviderId } from "@/lib/provider-keys"
 import { appendNovaSessionCookies, getNovaSession } from "@/lib/nova-auth"
-import { searchLaptopAsmeChunks } from "@/lib/asme-laptop-retrieval"
+import {
+  isBroadDivision2Part5Query,
+  normalizeAsmeRetrievalQuery,
+  searchLaptopAsmeChunks,
+} from "@/lib/asme-laptop-retrieval"
 import { retrievePdfFirstResearch, shouldSearchAsmeWebFallback } from "@/lib/asme-research-fallback"
 
 export const runtime = "nodejs"
@@ -622,13 +626,45 @@ async function runChat(
     .join("\n")
   emit({ type: "status", status: "Searching the ASME Code library…" })
 
-  const searchQuery = `${lastMessage.content}\n${lastMessage.attachmentName ?? ""}`
+  const searchQuery = normalizeAsmeRetrievalQuery(
+    `${lastMessage.content}\n${lastMessage.attachmentName ?? ""}`,
+  )
   const research = await retrievePdfFirstResearch<AsmeChunk, WebSource>(
     async () => {
       let laptopPassages: AsmeChunk[] = []
       if (process.env.ASME_LAPTOP_RETRIEVAL_URL?.trim()) {
         try {
           laptopPassages = await searchLaptopAsmeChunks(searchQuery, signal)
+          if (isBroadDivision2Part5Query(searchQuery) && laptopPassages.length > 0) {
+            emit({ type: "status", status: "Searching the retrieved Division 2 PDF for each Part 5 assessment section…" })
+            const sectionQueries = [
+              "5.1 scope design-by-analysis general requirements",
+              "5.2 protection against plastic collapse",
+              "5.3 protection against local failure",
+              "5.4 protection against collapse from buckling",
+              "5.5 protection against failure from cyclic loading fatigue ratcheting",
+            ]
+            const sectionResults = await Promise.allSettled(
+              sectionQueries.map((section) => searchLaptopAsmeChunks(`${searchQuery} ${section}`, signal)),
+            )
+            const failedSections = sectionResults.filter((result) => result.status === "rejected")
+            laptopPassages = [
+              ...laptopPassages,
+              ...sectionResults.flatMap((result) => result.status === "fulfilled" ? result.value : []),
+            ]
+            if (failedSections.length > 0) {
+              if (signal.aborted) throw signal.reason
+              console.warn(`Laptop Part 5 section search failed for ${failedSections.length} section query/queries.`)
+              emit({
+                type: "status",
+                status: `Some Part 5 sections could not be retrieved from the laptop PDF service (${failedSections.length} search requests failed).`,
+              })
+            }
+          }
+          laptopPassages = laptopPassages.filter(
+            (chunk, index, chunks) =>
+              chunks.findIndex((candidate) => candidate.source === chunk.source && candidate.page === chunk.page) === index,
+          )
           emit({
             type: "status",
             status: laptopPassages.length

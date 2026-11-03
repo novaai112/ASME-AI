@@ -39,6 +39,16 @@ const SEARCH_STOP_WORDS = new Set([
   "of",
   "on",
   "please",
+  "read",
+  "search",
+  "find",
+  "write",
+  "sort",
+  "summarize",
+  "summary",
+  "describe",
+  "pdf",
+  "pdfs",
   "the",
   "this",
   "to",
@@ -104,7 +114,7 @@ export function searchAsmeIndex(index: AsmeChunk[], query: string, limit = 8): A
     (requestedDivisions.length === 0 || (requestedDivisions.length === 1 && requestedDivisions[0] === "2"))
   if (isDivision2Part5Query) {
     const division2Chunks = eligible.filter((chunk) => /division\s*2/i.test(chunk.source.replace(/div[\s._-]*(\d)/gi, "division $1")))
-    const part5Ranges = new Map<string, { startPage: number; endPage: number }>()
+    const part5Ranges = new Map<string, { startPage: number; endPage?: number }>()
 
     for (const source of new Set(division2Chunks.map((chunk) => chunk.source))) {
       const sourceChunks = division2Chunks.filter((chunk) => chunk.source === source)
@@ -128,12 +138,14 @@ export function searchAsmeIndex(index: AsmeChunk[], query: string, limit = 8): A
         )
         .map((chunk) => chunk.page)
         .sort((a, b) => a - b)[0]
-      if (endPage !== undefined) part5Ranges.set(source, { startPage, endPage })
+      part5Ranges.set(source, { startPage, endPage })
     }
 
     eligible = division2Chunks.filter((chunk) => {
       const range = part5Ranges.get(chunk.source)
-      return range !== undefined && chunk.page >= range.startPage && chunk.page < range.endPage
+      if (!range || chunk.page < range.startPage) return false
+      if (range.endPage !== undefined) return chunk.page < range.endPage
+      return /^5(?:\.|$)/.test(chunk.clause ?? "") || /\b5\.\d+(?:\.\d+)?\s+[A-Z]/.test(chunk.text)
     })
   }
   const broadPart5 = part5Requested && requestedSections.length === 0
