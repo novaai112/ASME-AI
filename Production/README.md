@@ -38,7 +38,7 @@ The deployed site reaches the Laptop folder only through its configured HTTPS tu
 
 - **Laptop retrieval returns HTTP 401:** `ASME_LAPTOP_RETRIEVAL_TOKEN` in Vercel must exactly match `ASME_RETRIEVAL_TOKEN` in the laptop's `.env.local`. After changing the laptop file, restart `npm start`; after changing Vercel variables, redeploy. Do not share either token.
 - **Gemini rejects a key:** replace revoked or incorrectly restricted keys in Vercel. A server-side key must have access to the Gemini API and must not be restricted to browser referrers. Remove stale keys from both the plural key pool and any single-key variables. Keep another provider configured for failover when possible.
-- **Requests taking too long:** provider attempts now have a bounded timeout and a failing provider is skipped for the rest of that request, allowing other configured providers to be tried. If every configured provider rejects its keys or is unavailable, the assistant cannot produce an answer.
+- **Requests taking too long:** optional NVIDIA reranking has a short deadline and is skipped for broad Part 5 answers; targeted local PDF search and lexical ranking are used instead. Provider connection attempts and response streams are bounded, model output is capped to keep answers responsive, and the full chat request has a 4.5-minute deadline. If the full Part 5 answer still times out, ask about one section at a time (for example plastic collapse or buckling). If every configured provider rejects its keys or is unavailable, the assistant cannot produce an answer.
 
 ## Validation
 

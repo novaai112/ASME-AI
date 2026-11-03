@@ -15,6 +15,11 @@ export const maxDuration = 300
 
 const MAX_REQUEST_BYTES = 10 * 1024 * 1024
 const MAX_HISTORY_MESSAGES = 24
+const CHAT_REQUEST_DEADLINE_MS = 270_000
+const MODEL_STAGE_DEADLINE_MS = 220_000
+const PROVIDER_START_TIMEOUT_MS = 25_000
+const PROVIDER_STREAM_TIMEOUT_MS = 180_000
+const MAX_ANSWER_TOKENS = 4_096
 const AUTO_MODEL = "auto" as const
 const PROVIDERS: ProviderId[] = ["google", "anthropic", "openai", "groq", "nvidia"]
 type ModelSelection = ProviderId | typeof AUTO_MODEL
@@ -154,8 +159,15 @@ async function improveAsmePassages(
   query: string,
   passages: AsmeChunk[],
   signal: AbortSignal,
+  skipSemanticRanking = false,
 ): Promise<{ passages: AsmeChunk[]; notices: string[] }> {
   if (passages.length === 0) return { passages, notices: [] }
+  if (skipSemanticRanking) {
+    return {
+      passages: passages.slice(0, 8),
+      notices: ["Using section-targeted PDF search results directly to avoid delaying this broad Part 5 answer."],
+    }
+  }
   const keys = rotateProviderKeys("nvidia")
   if (keys.length === 0) {
     return {
@@ -169,10 +181,11 @@ async function improveAsmePassages(
   let embeddingFailure: Error | undefined
   let rerankingFailure: Error | undefined
 
-  for (const apiKey of keys) {
+  const semanticSignal = AbortSignal.any([signal, AbortSignal.timeout(12_000)])
+  for (const apiKey of keys.slice(0, 1)) {
     if (!embeddingRanked) {
       try {
-        const results = await rankPassagesByEmbedding(query, passages, apiKey, signal)
+        const results = await rankPassagesByEmbedding(query, passages, apiKey, semanticSignal)
         embeddingRanked = results.map(({ passage }) => passage)
       } catch (error) {
         if (signal.aborted) throw error
@@ -182,7 +195,7 @@ async function improveAsmePassages(
     if (!reranked) {
       try {
         const candidates = embeddingRanked ?? passages
-        const results = await rerankPassages(query, candidates, apiKey, signal)
+        const results = await rerankPassages(query, candidates, apiKey, semanticSignal)
         reranked = results.map(({ passage }) => passage)
       } catch (error) {
         if (signal.aborted) throw error
@@ -368,7 +381,7 @@ async function callGemini(
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
         contents,
-        generationConfig: { temperature: 0.2, maxOutputTokens: 8192 },
+        generationConfig: { temperature: 0.2, maxOutputTokens: MAX_ANSWER_TOKENS },
       }),
       signal,
     },
@@ -394,8 +407,8 @@ async function callOpenAICompatible(
   }
   const tokenLimit =
     provider === "openai"
-      ? { max_completion_tokens: 8192 }
-      : { max_tokens: 8192 }
+      ? { max_completion_tokens: MAX_ANSWER_TOKENS }
+      : { max_tokens: MAX_ANSWER_TOKENS }
   return fetch(endpoint, {
     method: "POST",
     headers,
@@ -457,7 +470,7 @@ async function callAnthropic(
       system: converted.system,
       messages: converted.messages,
       stream: true,
-      max_tokens: 8192,
+      max_tokens: MAX_ANSWER_TOKENS,
     }),
     signal,
   })
@@ -710,7 +723,12 @@ async function runChat(
           chunks.findIndex((candidate) => candidate.source === chunk.source && candidate.page === chunk.page) === index,
       )
       emit({ type: "status", status: "Checking ASME PDF evidence with semantic ranking…" })
-      const retrieval = await improveAsmePassages(searchQuery, lexicalPassages, signal)
+      const retrieval = await improveAsmePassages(
+        searchQuery,
+        lexicalPassages,
+        signal,
+        isBroadDivision2Part5Query(searchQuery),
+      )
       for (const notice of retrieval.notices) emit({ type: "status", status: notice })
       return retrieval.passages
     },
@@ -870,8 +888,14 @@ async function runChat(
   const failures: string[] = []
   const rejectedKeys = new Map<ProviderId, Set<string>>()
   const unavailableProviders = new Set<ProviderId>()
-  const modelDeadline = Date.now() + 240_000
-  let selectedProvider: { provider: ProviderId; response: Response; model: string; label: string } | undefined
+  const modelDeadline = Date.now() + MODEL_STAGE_DEADLINE_MS
+  let selectedProvider: {
+    provider: ProviderId
+    response: Response
+    model: string
+    label: string
+    controller: AbortController
+  } | undefined
 
   for (const candidate of candidates) {
     if (unavailableProviders.has(candidate.provider) || Date.now() >= modelDeadline) continue
@@ -882,14 +906,19 @@ async function runChat(
     for (const [keyIndex, apiKey] of keys.entries()) {
       const remainingMs = modelDeadline - Date.now()
       if (remainingMs <= 0) break
-      const attemptTimeout = AbortSignal.timeout(Math.min(60_000, remainingMs))
-      const attemptSignal = AbortSignal.any([signal, attemptTimeout])
+      const attemptController = new AbortController()
+      const attemptSignal = AbortSignal.any([signal, attemptController.signal])
+      const startTimeout = setTimeout(
+        () => attemptController.abort(new DOMException("Provider connection timed out.", "TimeoutError")),
+        Math.min(PROVIDER_START_TIMEOUT_MS, remainingMs),
+      )
       emit({
         type: "status",
         status: `Trying ${candidate.label} (key ${keyIndex + 1} of ${keys.length})…`,
       })
       try {
         const response = await callProvider(candidate, apiKey, relevantConversation, history, documentContext, webContext, attemptSignal)
+        clearTimeout(startTimeout)
         if (!response.ok) {
           await response.body?.cancel()
           const reason = describeProviderFailure(candidate.provider, response.status)
@@ -911,11 +940,18 @@ async function runChat(
           }
           continue
         }
-        selectedProvider = { provider: candidate.provider, response, model: candidate.model, label: candidate.label }
+        selectedProvider = {
+          provider: candidate.provider,
+          response,
+          model: candidate.model,
+          label: candidate.label,
+          controller: attemptController,
+        }
         break
       } catch (error) {
+        clearTimeout(startTimeout)
         if (signal.aborted) throw error
-        const timedOut = attemptTimeout.aborted
+        const timedOut = attemptController.signal.aborted
         const reason = timedOut ? "request timed out" : describeRequestFailure(error)
         failures.push(`${candidate.label} key ${keyIndex + 1}: ${reason}`)
         console.error(`${candidate.label} request failed: ${reason}.`)
@@ -926,7 +962,8 @@ async function runChat(
     if (selectedProvider) break
   }
 
-  if (!selectedProvider) {
+  const activeProvider = selectedProvider
+  if (!activeProvider) {
     const hasConfiguredKeys = candidates.some((candidate) => getProviderKeys(candidate.provider).length > 0)
     const configurationHint = hasConfiguredKeys
       ? "Configured cloud providers could not answer. The attempted provider statuses are listed below."
@@ -934,8 +971,22 @@ async function runChat(
     throw new Error(failures.length ? `${configurationHint} ${failures.join("; ")}` : configurationHint)
   }
 
-  emit({ type: "status", status: `Writing a sourced response with ${selectedProvider.label}…` })
-  await streamProviderText(selectedProvider.response, selectedProvider.provider, emit)
+  emit({ type: "status", status: `Writing a sourced response with ${activeProvider.label}…` })
+  const streamTimeout = setTimeout(
+    () => activeProvider.controller.abort(new DOMException("The model response exceeded its time limit.", "TimeoutError")),
+    Math.min(PROVIDER_STREAM_TIMEOUT_MS, Math.max(1, modelDeadline - Date.now())),
+  )
+  try {
+    await streamProviderText(activeProvider.response, activeProvider.provider, emit)
+  } catch (error) {
+    if (signal.aborted) throw error
+    if (activeProvider.controller.signal.aborted) {
+      throw new Error("The AI provider timed out while generating the answer. Retry, or ask about one Part 5 section at a time.")
+    }
+    throw error
+  } finally {
+    clearTimeout(streamTimeout)
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -1042,14 +1093,18 @@ export async function POST(request: NextRequest) {
   }
 
   const encoder = new TextEncoder()
+  const requestDeadline = AbortSignal.timeout(CHAT_REQUEST_DEADLINE_MS)
+  const operationSignal = AbortSignal.any([request.signal, requestDeadline])
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const emit = (event: StreamEvent) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
-      void runChat(messages, body.model ?? "", emit, request.signal)
+      void runChat(messages, body.model ?? "", emit, operationSignal)
         .then(() => controller.close())
         .catch((error: unknown) => {
           if (!request.signal.aborted) {
-            const message = error instanceof Error ? error.message : "The assistant could not complete this request."
+            const message = requestDeadline.aborted
+              ? "This request exceeded the 4-minute processing limit. Retry, or ask about one Part 5 section at a time."
+              : error instanceof Error ? error.message : "The assistant could not complete this request."
             console.error("Pressure Vessel Code Assistant error:", error)
             emit({ type: "error", error: message })
             controller.close()
