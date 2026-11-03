@@ -5,7 +5,9 @@ import { getProviderKeys, type ProviderId } from "@/lib/provider-keys"
 import { appendNovaSessionCookies, getNovaSession } from "@/lib/nova-auth"
 import {
   isBroadDivision2Part5Query,
+  laptopCircuitOpen,
   normalizeAsmeRetrievalQuery,
+  searchLaptopAsme,
   searchLaptopAsmeChunks,
 } from "@/lib/asme-laptop-retrieval"
 import { retrievePdfFirstResearch, shouldSearchAsmeWebFallback } from "@/lib/asme-research-fallback"
@@ -15,11 +17,17 @@ export const maxDuration = 300
 
 const MAX_REQUEST_BYTES = 10 * 1024 * 1024
 const MAX_HISTORY_MESSAGES = 24
-const CHAT_REQUEST_DEADLINE_MS = 270_000
-const MODEL_STAGE_DEADLINE_MS = 220_000
-const PROVIDER_START_TIMEOUT_MS = 25_000
-const PROVIDER_STREAM_TIMEOUT_MS = 180_000
-const MAX_ANSWER_TOKENS = 4_096
+const CHAT_REQUEST_DEADLINE_MS = 280_000
+const DEADLINE_SAFETY_MS = 15_000 // finish cleanly before the platform kills the function
+const MODEL_STAGE_DEADLINE_MS = 235_000
+const PROVIDER_START_TIMEOUT_MS = 20_000 // time allowed to get HTTP response headers
+const FIRST_TOKEN_TIMEOUT_MS = 45_000 // reasoning models can think for a while before the first word
+const IDLE_TIMEOUT_MS = 25_000 // silence mid-answer => treat the provider as stalled and fail over
+const MAX_ANSWER_TOKENS = 6_144
+const MAX_CONTINUATIONS = 4 // auto-continue when a model stops at its output limit
+const MAX_ATTEMPTS_PER_REQUEST = 18
+const HEARTBEAT_MS = 7_000
+const MAX_RESUME_CHARS = 80_000
 const AUTO_MODEL = "auto" as const
 const PROVIDERS: ProviderId[] = ["google", "anthropic", "openai", "groq", "nvidia"]
 type ModelSelection = ProviderId | typeof AUTO_MODEL
@@ -55,7 +63,12 @@ interface WebSource {
   content: string
 }
 
-type StreamEvent = { type: "status"; status: string } | { type: "text"; text: string } | { type: "error"; error: string }
+type StreamEvent =
+  | { type: "status"; status: string }
+  | { type: "text"; text: string }
+  | { type: "meta"; provider: string; label: string; switched: boolean }
+  | { type: "done"; complete: boolean; degraded?: boolean; reason?: string }
+  | { type: "error"; error: string; retryable?: boolean }
 type ProviderCandidate = { provider: ProviderId; model: string; label: string }
 
 const providerKeyOffsets = new Map<ProviderId, number>()
@@ -68,6 +81,24 @@ function rotateProviderKeys(provider: ProviderId): string[] {
   providerKeyOffsets.set(provider, (offset + 1) % keys.length)
   return [...keys.slice(offset), ...keys.slice(0, offset)]
 }
+
+// Shared across requests on a warm instance: remember what just failed so the next question
+// skips dead models/keys immediately instead of re-learning it at 20 s per attempt.
+const healthCooldowns = new Map<string, number>()
+function cooldown(key: string, ms: number) {
+  healthCooldowns.set(key, Date.now() + ms)
+}
+function isCoolingDown(key: string): boolean {
+  const until = healthCooldowns.get(key)
+  if (!until) return false
+  if (until <= Date.now()) {
+    healthCooldowns.delete(key)
+    return false
+  }
+  return true
+}
+const modelHealthKey = (provider: ProviderId, model: string) => `${provider}|${model}`
+const keyHealthKey = (provider: ProviderId, apiKey: string) => `${provider}|key|${apiKey.slice(-8)}`
 
 const PROVIDER_MODEL_ORDER: Record<TaskType, ProviderId[]> = {
   vision: ["nvidia", "google", "anthropic", "openai", "groq"],
@@ -138,7 +169,7 @@ function getTaskType(message: ChatMessage): TaskType {
 function getProviderLabel(provider: ProviderId): string {
   if (provider === "google") return "Gemini"
   if (provider === "anthropic") return "Claude"
-  if (provider === "openai") return "GPT-4o"
+  if (provider === "openai") return "GPT"
   if (provider === "groq") return "Groq"
   return "NVIDIA"
 }
@@ -160,18 +191,19 @@ async function improveAsmePassages(
   passages: AsmeChunk[],
   signal: AbortSignal,
   skipSemanticRanking = false,
+  maxPassages = 12,
 ): Promise<{ passages: AsmeChunk[]; notices: string[] }> {
   if (passages.length === 0) return { passages, notices: [] }
   if (skipSemanticRanking) {
     return {
-      passages: passages.slice(0, 8),
-      notices: ["Using section-targeted PDF search results directly to avoid delaying this broad Part 5 answer."],
+      passages: passages.slice(0, maxPassages),
+      notices: [`Using ${Math.min(passages.length, maxPassages)} section-spread PDF passages covering the whole Part.`],
     }
   }
   const keys = rotateProviderKeys("nvidia")
   if (keys.length === 0) {
     return {
-      passages: passages.slice(0, 8),
+      passages: passages.slice(0, maxPassages),
       notices: ["NVIDIA semantic retrieval is not configured; using local ASME search ranking."],
     }
   }
@@ -222,7 +254,7 @@ async function improveAsmePassages(
   }
 
   return {
-    passages: (reranked ?? embeddingRanked ?? passages).slice(0, 8),
+    passages: (reranked ?? embeddingRanked ?? passages).slice(0, maxPassages),
     notices,
   }
 }
@@ -240,7 +272,7 @@ function isExplicitFollowUp(content: string): boolean {
 }
 
 function textEventResponse(text: string): Response {
-  return new Response(`data: ${JSON.stringify({ type: "text", text })}\n\n`, {
+  return new Response(`data: ${JSON.stringify({ type: "text", text })}\n\ndata: ${JSON.stringify({ type: "done", complete: true })}\n\n`, {
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
@@ -563,23 +595,59 @@ function describeRequestFailure(error: unknown): string {
   return "network request failed"
 }
 
-async function streamProviderText(response: Response, provider: ProviderId, emit: (event: StreamEvent) => void) {
+interface ProviderStreamResult {
+  outputLimitReached: boolean
+}
+
+async function streamProviderText(
+  response: Response,
+  provider: ProviderId,
+  onText: (text: string) => void,
+  onActivity: () => void,
+): Promise<ProviderStreamResult> {
   if (!response.body) throw new Error("The model returned an empty response.")
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ""
   let emittedText = false
   let outputLimitReached = false
+  let blocked = ""
+
+  const contentToText = (content: unknown): string => {
+    if (typeof content === "string") return content
+    if (Array.isArray(content)) {
+      return content
+        .map((block) =>
+          block && typeof block === "object" && "text" in block && typeof block.text === "string" ? block.text : "",
+        )
+        .join("")
+    }
+    if (content && typeof content === "object" && "text" in content && typeof content.text === "string") {
+      return content.text
+    }
+    return ""
+  }
 
   const consumeLine = (line: string) => {
     if (!line.startsWith("data:")) return
     const data = line.slice(5).trim()
     if (!data || data === "[DONE]") return
-    const item = JSON.parse(data) as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>
+    let item: {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> }; finishReason?: string }>
       choices?: Array<{ delta?: { content?: unknown }; finish_reason?: string }>
       type?: string
       delta?: { type?: string; text?: string; stop_reason?: string | null }
+      error?: { message?: string } | string
+    }
+    try {
+      item = JSON.parse(data)
+    } catch {
+      return // ignore a partial/garbled keep-alive line instead of killing the whole answer
+    }
+    // Providers report overload *inside* a 200 stream. Surface it so we can fail over mid-answer.
+    if (item.type === "error" || item.error) {
+      const detail = typeof item.error === "string" ? item.error : item.error?.message
+      throw new Error(`Provider stream error${detail ? `: ${detail}` : ""}`)
     }
     const finishReason =
       provider === "google"
@@ -588,29 +656,16 @@ async function streamProviderText(response: Response, provider: ProviderId, emit
           ? item.type === "message_delta" ? item.delta?.stop_reason : undefined
           : item.choices?.[0]?.finish_reason
     if (finishReason && /^(?:max_tokens|length)$/i.test(finishReason)) outputLimitReached = true
-    const contentToText = (content: unknown): string => {
-      if (typeof content === "string") return content
-      if (Array.isArray(content)) {
-        return content
-          .map((block) =>
-            block && typeof block === "object" && "text" in block && typeof block.text === "string" ? block.text : "",
-          )
-          .join("")
-      }
-      if (content && typeof content === "object" && "text" in content && typeof content.text === "string") {
-        return content.text
-      }
-      return ""
-    }
+    if (finishReason && /^(?:SAFETY|RECITATION|BLOCKLIST|PROHIBITED_CONTENT|SPII)$/i.test(finishReason)) blocked = finishReason
     const text =
       provider === "google"
-        ? item.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("")
+        ? item.candidates?.[0]?.content?.parts?.filter((part) => !part.thought).map((part) => part.text ?? "").join("")
         : provider === "anthropic"
           ? item.type === "content_block_delta" && item.delta?.type === "text_delta" ? item.delta.text ?? "" : ""
           : contentToText(item.choices?.[0]?.delta?.content)
     if (text) {
       emittedText = true
-      emit({ type: "text", text })
+      onText(text)
     }
   }
 
@@ -618,10 +673,10 @@ async function streamProviderText(response: Response, provider: ProviderId, emit
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
+      onActivity()
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split("\n")
       buffer = lines.pop() ?? ""
-
       for (const line of lines) consumeLine(line)
     }
     buffer += decoder.decode()
@@ -630,12 +685,66 @@ async function streamProviderText(response: Response, provider: ProviderId, emit
     reader.releaseLock()
   }
   if (!emittedText) throw new Error("The selected model finished without returning a text response.")
-  if (outputLimitReached) {
-    emit({
-      type: "text",
-      text: "\n\n> **Response may be incomplete:** the AI model reached its output limit. Ask “continue from where you stopped” to continue.",
-    })
+  if (blocked) throw new Error(`The model stopped early (${blocked}).`)
+  return { outputLimitReached }
+}
+
+/** Drops text a new provider repeats from the end of what the previous provider already wrote. */
+function makeOverlapFilter(previous: string, write: (text: string) => void) {
+  const tail = previous.slice(-400)
+  let pending = ""
+  let released = tail.length === 0
+  const release = () => {
+    released = true
+    let skip = 0
+    for (let k = Math.min(pending.length, tail.length, 320); k >= 12; k -= 1) {
+      if (tail.endsWith(pending.slice(0, k))) {
+        skip = k
+        break
+      }
+    }
+    const rest = pending.slice(skip)
+    pending = ""
+    if (rest) write(rest)
   }
+  return {
+    push(text: string) {
+      if (released) return write(text)
+      pending += text
+      if (pending.length >= 340) release()
+    },
+    flush() {
+      if (!released) release()
+    },
+  }
+}
+
+function continuationNote(answer: string): string {
+  const headings = answer.split("\n").filter((line) => /^#{1,4}\s/.test(line)).slice(-30).join("\n")
+  return `\n\nCONTINUATION INSTRUCTIONS: Another writer already produced the first part of this same answer and was interrupted. Continue the SAME answer from exactly where it stops. Do not restart, do not greet, do not repeat any heading or point already written, and do not add a new introduction. If the last sentence is unfinished, finish it first. Cover every section still missing, then end with a clear conclusion.\nHeadings already written:\n${headings || "(none)"}\nThe answer so far ends with:\n<<<\n${answer.slice(-5000)}\n>>>`
+}
+
+/** Used only when no AI writer can run: a clean, cited digest of the matching PDF passages. */
+function buildSourceDigest(chunks: AsmeChunk[], web: WebSource[]): string {
+  const lines: string[] = [
+    "### Source passages found for your question",
+    "",
+    "The AI writers are all busy for a moment, so here are the most relevant passages from your ASME library, in page order. Send your question again in a minute for a full written explanation.",
+    "",
+  ]
+  const ordered = [...chunks].sort((a, b) => a.source.localeCompare(b.source) || a.page - b.page).slice(0, 12)
+  for (const chunk of ordered) {
+    const clause = chunk.clause ? ` · ${chunk.clause}` : ""
+    const snippet = chunk.text.replace(/\s+/g, " ").trim().slice(0, 420)
+    lines.push(`**${chunk.source.replace(/\.pdf$/i, "")}, page ${chunk.page}${clause}**`, "", `> ${snippet}${chunk.text.length > 420 ? "…" : ""}`, "")
+  }
+  if (web.length > 0) {
+    lines.push("**Supplementary web research (not Code authority)**", "")
+    for (const source of web.slice(0, 4)) lines.push(`- [${source.title}](${source.url})`)
+    lines.push("")
+  }
+  lines.push("*Excerpts are shortened. Verify against the licensed Code edition that governs your project.*")
+  return lines.join("\n")
 }
 
 async function runChat(
@@ -643,6 +752,7 @@ async function runChat(
   model: string,
   emit: (event: StreamEvent) => void,
   signal: AbortSignal,
+  options: { resume: string; deadlineAt: number },
 ) {
   const lastMessage = messages[messages.length - 1]
   const relevantConversation = getRelevantConversation(messages)
@@ -653,16 +763,25 @@ async function runChat(
     .join("\n")
   emit({ type: "status", status: "Searching the ASME Code library…" })
 
+  // "Continue", "why?", "explain more" carry no ASME terms: search with the previous question too.
+  const previousUserQuestion = isExplicitFollowUp(lastMessage.content)
+    ? messages.slice(0, -1).reverse().find((message) => message.role === "user")?.content ?? ""
+    : ""
   const searchQuery = normalizeAsmeRetrievalQuery(
-    `${lastMessage.content}\n${lastMessage.attachmentName ?? ""}`,
+    `${previousUserQuestion.slice(0, 600)}\n${lastMessage.content}\n${lastMessage.attachmentName ?? ""}`,
   )
+  let partOverview = false
   const research = await retrievePdfFirstResearch<AsmeChunk, WebSource>(
     async () => {
       let laptopPassages: AsmeChunk[] = []
       if (process.env.ASME_LAPTOP_RETRIEVAL_URL?.trim()) {
         try {
-          laptopPassages = await searchLaptopAsmeChunks(searchQuery, signal)
-          if (isBroadDivision2Part5Query(searchQuery) && laptopPassages.length > 0) {
+          const broadPart5 = isBroadDivision2Part5Query(searchQuery)
+          const primary = await searchLaptopAsme(searchQuery, signal, { limit: broadPart5 ? 36 : 16 })
+          laptopPassages = primary.chunks
+          partOverview = primary.meta.mode === "part-overview"
+          if (broadPart5 && !partOverview && laptopPassages.length > 0) {
+            // Older laptop service without Part-aware search: fall back to one query per Part 5 section.
             emit({ type: "status", status: "Searching the retrieved Division 2 PDF for each Part 5 assessment section…" })
             const sectionQueries = [
               "5.1 scope design-by-analysis general requirements",
@@ -674,19 +793,11 @@ async function runChat(
             const sectionResults = await Promise.allSettled(
               sectionQueries.map((section) => searchLaptopAsmeChunks(`${searchQuery} ${section}`, signal)),
             )
-            const failedSections = sectionResults.filter((result) => result.status === "rejected")
             laptopPassages = [
               ...laptopPassages,
-              ...sectionResults.flatMap((result) => result.status === "fulfilled" ? result.value : []),
+              ...sectionResults.flatMap((result) => (result.status === "fulfilled" ? result.value : [])),
             ]
-            if (failedSections.length > 0) {
-              if (signal.aborted) throw signal.reason
-              console.warn(`Laptop Part 5 section search failed for ${failedSections.length} section query/queries.`)
-              emit({
-                type: "status",
-                status: `Some Part 5 sections could not be retrieved from the laptop PDF service (${failedSections.length} search requests failed).`,
-              })
-            }
+            if (signal.aborted) throw signal.reason
           }
           laptopPassages = laptopPassages.filter(
             (chunk, index, chunks) =>
@@ -704,11 +815,13 @@ async function runChat(
           console.warn("Laptop ASME PDF search was unavailable.", detail)
           const status =
             detail.includes("HTTP 401")
-              ? "The laptop rejected the retrieval token; Vercel's ASME_LAPTOP_RETRIEVAL_TOKEN must match the token loaded by the laptop service."
-              : `Laptop PDFs are currently unreachable (${detail}).`
+              ? "Laptop PDF library rejected the access token (check ASME_LAPTOP_RETRIEVAL_TOKEN)."
+              : laptopCircuitOpen()
+                ? "Laptop PDF library is offline right now."
+                : `Laptop PDF library could not be reached (${detail}).`
           emit({
             type: "status",
-            status: `${status} Automatically checking ASME web research if configured…`,
+            status: `${status} Switching to web research automatically…`,
           })
         }
       } else {
@@ -718,16 +831,22 @@ async function runChat(
         })
       }
 
-      const lexicalPassages = searchAsmeIndex(laptopPassages, searchQuery, 24).filter(
-        (chunk, index, chunks) =>
-          chunks.findIndex((candidate) => candidate.source === chunk.source && candidate.page === chunk.page) === index,
-      )
-      emit({ type: "status", status: "Checking ASME PDF evidence with semantic ranking…" })
+      const dedupePages = (list: AsmeChunk[]) =>
+        list.filter(
+          (chunk, index, all) => all.findIndex((c) => c.source === chunk.source && c.page === chunk.page) === index,
+        )
+      // A Part overview is already spread across 5.1-5.x in page order; re-ranking would crowd that out.
+      const lexicalPassages = partOverview
+        ? dedupePages(laptopPassages)
+        : dedupePages(searchAsmeIndex(laptopPassages, searchQuery, 24))
+      if (!partOverview) emit({ type: "status", status: "Checking ASME PDF evidence with semantic ranking…" })
+      const broadForContext = isBroadDivision2Part5Query(searchQuery)
       const retrieval = await improveAsmePassages(
         searchQuery,
         lexicalPassages,
         signal,
-        isBroadDivision2Part5Query(searchQuery),
+        broadForContext || partOverview,
+        broadForContext || partOverview ? 30 : 12,
       )
       for (const notice of retrieval.notices) emit({ type: "status", status: notice })
       return retrieval.passages
@@ -870,123 +989,177 @@ async function runChat(
     status: `Found ${relevantChunks.length} relevant passages in ${sourceNames.length} PDFs: ${sourceSummary}${remainingSources}.`,
   })
 
-  const history = makeChatHistory(relevantConversation, documentContext, webSources)
   const modelSelection = getModelPreference(model)
   const task = getTaskType(lastMessage)
   const candidates = getProviderCandidates(modelSelection, task)
   const taskLabel =
     task === "vision" ? "image analysis" :
-    task === "reasoning" ? "technical reasoning/calculation" :
-    task === "simple" ? "a concise definition" : "ASME question answering"
+    task === "reasoning" ? "technical reasoning" :
+    task === "simple" ? "a concise definition" : "ASME answer"
   emit({
     type: "status",
     status:
       modelSelection === AUTO_MODEL
-        ? `Auto is routing this ${taskLabel} to ${getProviderLabel(candidates[0].provider)} and will fall back across configured providers if needed…`
-        : `Routing this ${taskLabel} through ${getProviderLabel(modelSelection)} first; other configured providers remain available as fallback…`,
+        ? `Auto-routing this ${taskLabel} to the best available model…`
+        : `Routing this ${taskLabel} through ${getProviderLabel(modelSelection)} first…`,
   })
-  const failures: string[] = []
-  const rejectedKeys = new Map<ProviderId, Set<string>>()
-  const unavailableProviders = new Set<ProviderId>()
-  const modelDeadline = Date.now() + MODEL_STAGE_DEADLINE_MS
-  let selectedProvider: {
-    provider: ProviderId
-    response: Response
-    model: string
-    label: string
-    controller: AbortController
-  } | undefined
 
-  for (const candidate of candidates) {
-    if (unavailableProviders.has(candidate.provider) || Date.now() >= modelDeadline) continue
-    const rejected = rejectedKeys.get(candidate.provider)
-    const keys = rotateProviderKeys(candidate.provider).filter((key) => !rejected?.has(key))
-    if (keys.length === 0) continue
+  // ---- Model stage: failover that also works in the MIDDLE of an answer ----------------------
+  const modelDeadline = Math.min(Date.now() + MODEL_STAGE_DEADLINE_MS, options.deadlineAt - DEADLINE_SAFETY_MS)
+  let answer = options.resume
+  const startedLength = answer.length
+  let lastLabel = ""
+  let attempts = 0
+  let continuations = 0
+  const rejectedKeys = new Set<string>()
+  const writeText = (text: string) => {
+    if (!text) return
+    answer += text
+    emit({ type: "text", text })
+  }
 
-    for (const [keyIndex, apiKey] of keys.entries()) {
-      const remainingMs = modelDeadline - Date.now()
-      if (remainingMs <= 0) break
-      const attemptController = new AbortController()
-      const attemptSignal = AbortSignal.any([signal, attemptController.signal])
-      const startTimeout = setTimeout(
-        () => attemptController.abort(new DOMException("Provider connection timed out.", "TimeoutError")),
-        Math.min(PROVIDER_START_TIMEOUT_MS, remainingMs),
+  type Outcome = "complete" | "truncated" | "failed"
+  const attempt = async (candidate: ProviderCandidate, apiKey: string): Promise<Outcome> => {
+    const continuing = answer.length > 0
+    const extra = continuing ? continuationNote(answer) : ""
+    const history = makeChatHistory(relevantConversation, `${documentContext}${extra}`, webSources)
+    const controller = new AbortController()
+    const attemptSignal = AbortSignal.any([signal, controller.signal])
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const arm = (ms: number) => {
+      clearTimeout(timer)
+      const remaining = Math.max(1_000, modelDeadline - Date.now())
+      timer = setTimeout(
+        () => controller.abort(new DOMException("Provider stalled or timed out.", "TimeoutError")),
+        Math.min(ms, remaining),
       )
-      emit({
-        type: "status",
-        status: `Trying ${candidate.label} (key ${keyIndex + 1} of ${keys.length})…`,
-      })
-      try {
-        const response = await callProvider(candidate, apiKey, relevantConversation, history, documentContext, webContext, attemptSignal)
-        clearTimeout(startTimeout)
-        if (!response.ok) {
-          await response.body?.cancel()
-          const reason = describeProviderFailure(candidate.provider, response.status)
-          failures.push(`${candidate.label} key ${keyIndex + 1}: ${reason}`)
-          console.error(`${candidate.label} request failed: ${reason}.`)
-          if (response.status === 401 || response.status === 403) {
-            const providerKeys = rejectedKeys.get(candidate.provider) ?? new Set<string>()
-            providerKeys.add(apiKey)
-            rejectedKeys.set(candidate.provider, providerKeys)
-            continue
-          }
-          if (response.status >= 500) {
-            unavailableProviders.add(candidate.provider)
-            break
-          }
-          if (response.status !== 401 && response.status !== 402 && response.status !== 403 &&
-              response.status !== 408 && response.status !== 429 && response.status < 500) {
-            break
-          }
-          continue
+    }
+    const overlap = makeOverlapFilter(continuing ? answer : "", writeText)
+    const label = candidate.label
+    attempts += 1
+    arm(PROVIDER_START_TIMEOUT_MS)
+    try {
+      const response = await callProvider(candidate, apiKey, relevantConversation, history, `${documentContext}${extra}`, webContext, attemptSignal)
+      if (!response.ok) {
+        await response.body?.cancel()
+        const status = response.status
+        const reason = describeProviderFailure(candidate.provider, status)
+        console.error(`${label} (${candidate.model}) failed: ${reason}.`)
+        if (status === 401 || status === 403) {
+          rejectedKeys.add(apiKey)
+          cooldown(keyHealthKey(candidate.provider, apiKey), 10 * 60_000)
+        } else if (status === 402) {
+          cooldown(keyHealthKey(candidate.provider, apiKey), 30 * 60_000)
+        } else if (status === 404) {
+          cooldown(modelHealthKey(candidate.provider, candidate.model), 30 * 60_000)
+        } else if (status === 400) {
+          cooldown(modelHealthKey(candidate.provider, candidate.model), 3 * 60_000)
+        } else if (status === 408 || status === 429) {
+          cooldown(modelHealthKey(candidate.provider, candidate.model), 60_000)
+          cooldown(keyHealthKey(candidate.provider, apiKey), 45_000)
+        } else {
+          cooldown(modelHealthKey(candidate.provider, candidate.model), 45_000)
         }
-        selectedProvider = {
-          provider: candidate.provider,
-          response,
-          model: candidate.model,
-          label: candidate.label,
-          controller: attemptController,
-        }
-        break
-      } catch (error) {
-        clearTimeout(startTimeout)
-        if (signal.aborted) throw error
-        const timedOut = attemptController.signal.aborted
-        const reason = timedOut ? "request timed out" : describeRequestFailure(error)
-        failures.push(`${candidate.label} key ${keyIndex + 1}: ${reason}`)
-        console.error(`${candidate.label} request failed: ${reason}.`)
-        unavailableProviders.add(candidate.provider)
+        return "failed"
+      }
+
+      if (label !== lastLabel) {
+        const switched = lastLabel !== "" || startedLength > 0
+        emit({ type: "meta", provider: candidate.provider, label: getProviderLabel(candidate.provider), switched })
+        emit({
+          type: "status",
+          status: switched
+            ? `Continuing your answer with ${getProviderLabel(candidate.provider)}…`
+            : `Writing a sourced response with ${getProviderLabel(candidate.provider)}…`,
+        })
+        lastLabel = label
+      }
+      arm(FIRST_TOKEN_TIMEOUT_MS)
+      const result = await streamProviderText(response, candidate.provider, overlap.push, () => arm(IDLE_TIMEOUT_MS))
+      overlap.flush()
+      return result.outputLimitReached ? "truncated" : "complete"
+    } catch (error) {
+      overlap.flush() // keep whatever the model managed to write before it died
+      if (signal.aborted) throw error
+      const stalled = controller.signal.aborted
+      console.error(`${label} (${candidate.model}) ${stalled ? "stalled" : "stream failed"}: ${stalled ? "timeout" : describeRequestFailure(error)}.`)
+      cooldown(modelHealthKey(candidate.provider, candidate.model), 45_000)
+      return "failed"
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  const buildPool = (ignoreCooldowns: boolean) => {
+    const pool: Array<{ candidate: ProviderCandidate; apiKey: string }> = []
+    for (const candidate of candidates) {
+      if (!ignoreCooldowns && isCoolingDown(modelHealthKey(candidate.provider, candidate.model))) continue
+      const keys = rotateProviderKeys(candidate.provider).filter(
+        (key) => !rejectedKeys.has(key) && (ignoreCooldowns || !isCoolingDown(keyHealthKey(candidate.provider, key))),
+      )
+      // One key per model per pass is enough; the key pool still rotates between requests.
+      if (keys[0]) pool.push({ candidate, apiKey: keys[0] })
+    }
+    return pool
+  }
+
+  let finished = false
+  let idleRounds = 0
+  while (!finished && Date.now() < modelDeadline && attempts < MAX_ATTEMPTS_PER_REQUEST) {
+    const pool = buildPool(idleRounds > 0)
+    let progressed = false
+    for (const { candidate, apiKey } of pool) {
+      if (Date.now() >= modelDeadline || attempts >= MAX_ATTEMPTS_PER_REQUEST) break
+      const lengthBefore = answer.length
+      const outcome = await attempt(candidate, apiKey)
+      if (outcome === "complete") {
+        finished = true
         break
       }
+      if (outcome === "truncated") {
+        // The model hit its output limit: keep going with another pass instead of showing a warning.
+        continuations += 1
+        if (continuations > MAX_CONTINUATIONS) finished = true
+        progressed = true
+        break
+      }
+      if (answer.length > lengthBefore) {
+        // It failed mid-answer but wrote something; the next provider continues from there.
+        emit({ type: "status", status: "Provider interrupted; switching automatically to keep your answer going…" })
+      }
     }
-    if (selectedProvider) break
+    if (finished) break
+    if (!progressed) {
+      idleRounds += 1
+      if (idleRounds > 1) break
+      await new Promise((resolve) => setTimeout(resolve, 1_200))
+    } else {
+      idleRounds = 0
+    }
   }
 
-  const activeProvider = selectedProvider
-  if (!activeProvider) {
-    const hasConfiguredKeys = candidates.some((candidate) => getProviderKeys(candidate.provider).length > 0)
-    const configurationHint = hasConfiguredKeys
-      ? "Configured cloud providers could not answer. The attempted provider statuses are listed below."
-      : "Configure at least one cloud-provider API key in .env.local."
-    throw new Error(failures.length ? `${configurationHint} ${failures.join("; ")}` : configurationHint)
+  if (finished) {
+    emit({ type: "done", complete: true })
+    return
   }
 
-  emit({ type: "status", status: `Writing a sourced response with ${activeProvider.label}…` })
-  const streamTimeout = setTimeout(
-    () => activeProvider.controller.abort(new DOMException("The model response exceeded its time limit.", "TimeoutError")),
-    Math.min(PROVIDER_STREAM_TIMEOUT_MS, Math.max(1, modelDeadline - Date.now())),
-  )
-  try {
-    await streamProviderText(activeProvider.response, activeProvider.provider, emit)
-  } catch (error) {
-    if (signal.aborted) throw error
-    if (activeProvider.controller.signal.aborted) {
-      throw new Error("The AI provider timed out while generating the answer. Retry, or ask about one Part 5 section at a time.")
-    }
-    throw error
-  } finally {
-    clearTimeout(streamTimeout)
+  if (answer.length > startedLength || options.resume) {
+    // Partial answer on screen. Tell the browser to resume rather than showing an error.
+    emit({ type: "done", complete: false, reason: Date.now() >= modelDeadline ? "deadline" : "providers" })
+    return
   }
+
+  console.error("All AI providers failed for this request.")
+  if (relevantChunks.length > 0 || webSources.length > 0) {
+    writeText(buildSourceDigest(relevantChunks, webSources))
+    emit({ type: "done", complete: true, degraded: true })
+    return
+  }
+  emit({
+    type: "error",
+    retryable: true,
+    error: "The AI writers are busy for a moment. Trying again automatically…",
+  })
 }
 
 export async function POST(request: NextRequest) {
@@ -995,13 +1168,13 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "Request body is too large." }, { status: 413 })
   }
 
-  let body: { messages?: ChatMessage[]; model?: string }
+  let body: { messages?: ChatMessage[]; model?: string; resume?: unknown }
   try {
     const parsedBody = await readJsonBody(request)
     if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
       return Response.json({ error: "Request body must be a JSON object." }, { status: 400 })
     }
-    body = parsedBody as { messages?: ChatMessage[]; model?: string }
+    body = parsedBody as { messages?: ChatMessage[]; model?: string; resume?: unknown }
   } catch (error) {
     if (error instanceof RangeError) return Response.json({ error: error.message }, { status: 413 })
     return Response.json({ error: "Request body must be valid JSON." }, { status: 400 })
@@ -1087,31 +1260,71 @@ export async function POST(request: NextRequest) {
     lastMessage.attachmentName ?? "",
     previousUserMessage?.content ?? "",
   ].join("\n")
+  if (/^\s*(?:hi|hello|hey|salam|namaste|good\s+(?:morning|afternoon|evening)|help|what can you do)\b[\s\S]{0,40}$/i.test(lastMessage.content) && !lastMessage.attachmentData) {
+    const response = textEventResponse(
+      "Hello! I’m **ASME Interpreter**. Ask me about ASME BPVC Section VIII (Divisions 1, 2 and 3) — design rules, Part 5 design-by-analysis, materials, fabrication, examination, pressure testing, or edition comparisons — and I’ll answer with citations to the exact PDF edition and page. You can also attach a PDF or image to analyse.",
+    )
+    return novaSession.refreshed ? appendNovaSessionCookies(response, novaSession) : response
+  }
   if (!isAsmeRelatedQuestion(scopeQuery)) {
     const response = textEventResponse(OUT_OF_SCOPE_MESSAGE)
     return novaSession.refreshed ? appendNovaSessionCookies(response, novaSession) : response
   }
 
+  const resumeText = typeof body.resume === "string" ? body.resume.slice(-MAX_RESUME_CHARS) : ""
   const encoder = new TextEncoder()
+  const startedAt = Date.now()
   const requestDeadline = AbortSignal.timeout(CHAT_REQUEST_DEADLINE_MS)
   const operationSignal = AbortSignal.any([request.signal, requestDeadline])
+  let heartbeat: ReturnType<typeof setInterval> | undefined
+  let closed = false
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      const emit = (event: StreamEvent) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
-      void runChat(messages, body.model ?? "", emit, operationSignal)
-        .then(() => controller.close())
+      const send = (chunk: string) => {
+        if (closed) return
+        try {
+          controller.enqueue(encoder.encode(chunk))
+        } catch {
+          closed = true // browser went away; stop writing
+        }
+      }
+      const emit = (event: StreamEvent) => send(`data: ${JSON.stringify(event)}\n\n`)
+      const finish = () => {
+        clearInterval(heartbeat)
+        if (closed) return
+        closed = true
+        try {
+          controller.close()
+        } catch {
+          /* already closed */
+        }
+      }
+      // Padding + comment pings keep proxies/tunnels/browsers from killing a quiet-but-alive stream.
+      send(`: connected${" ".repeat(2048)}\n\n`)
+      heartbeat = setInterval(() => send(": ping\n\n"), HEARTBEAT_MS)
+
+      void runChat(messages, body.model ?? "", emit, operationSignal, {
+        resume: resumeText,
+        deadlineAt: startedAt + CHAT_REQUEST_DEADLINE_MS,
+      })
         .catch((error: unknown) => {
-          if (!request.signal.aborted) {
-            const message = requestDeadline.aborted
-              ? "This request exceeded the 4-minute processing limit. Retry, or ask about one Part 5 section at a time."
-              : error instanceof Error ? error.message : "The assistant could not complete this request."
-            console.error("Pressure Vessel Code Assistant error:", error)
-            emit({ type: "error", error: message })
-            controller.close()
+          if (request.signal.aborted) return
+          console.error("Pressure Vessel Code Assistant error:", error)
+          if (requestDeadline.aborted) {
+            emit({ type: "done", complete: false, reason: "deadline" })
           } else {
-            controller.close()
+            emit({
+              type: "error",
+              retryable: true,
+              error: "Something interrupted this answer. Reconnecting automatically…",
+            })
           }
         })
+        .finally(finish)
+    },
+    cancel() {
+      closed = true
+      clearInterval(heartbeat)
     },
   })
 
