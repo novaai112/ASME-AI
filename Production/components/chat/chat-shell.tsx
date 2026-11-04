@@ -248,8 +248,9 @@ export function ChatShell() {
       let modelLabel: string | undefined
       let switched = false
       let part5: { sections: string[]; calculators: string[] } | undefined
-      const requestMode = nextModeRef.current
+      let requestMode: "ai" | "engine" | "deep" | undefined = nextModeRef.current
       nextModeRef.current = undefined
+      let deepStart = -1
 
       const pushStatus = (status: string) => {
         setAssistantStatus(status)
@@ -290,7 +291,7 @@ export function ChatShell() {
           sawEvent = true
           if (item.type === "status" && item.status) pushStatus(item.status)
           else if (item.type === "text" && item.text) { accumulated += item.text; setRecovering(false) }
-          else if (item.type === "meta") { modelLabel = item.label ?? modelLabel; switched = switched || Boolean(item.switched) }
+          else if (item.type === "meta") { if (deepStart < 0) { modelLabel = item.label ?? modelLabel; switched = switched || Boolean(item.switched) } }
           else if (item.type === "part5") { part5 = { sections: item.sections ?? [], calculators: item.calculators ?? [] } }
           else if (item.type === "done") { finished = Boolean(item.complete); degraded = Boolean(item.degraded) }
           else if (item.type === "error") softError = { retryable: item.retryable !== false, message: item.error }
@@ -325,16 +326,56 @@ export function ChatShell() {
       try {
         let lastFailure: string | undefined
         while (!finished) {
-          const result = await runPass(accumulated)
+          const result = await runPass(deepStart >= 0 ? accumulated.slice(deepStart) : accumulated)
           if (finished) break
           lastFailure = result.message
           if (!result.retryable) throw new Error(result.message || "The request was rejected.")
-          if (recoveries >= MAX_AUTO_RECOVERIES) break
+          if (deepStart >= 0) {
+            // The deep-dive is a bonus on top of the instant Part 5 answer: one quiet retry, then give up gracefully.
+            if (recoveries >= 1) break
+          } else if (recoveries >= MAX_AUTO_RECOVERIES) break
           recoveries += 1
+          // The AI keeps failing: stop looping and let the built-in engine answer from the PDFs right away.
+          if (deepStart < 0 && recoveries >= 2 && !requestMode) {
+            requestMode = "engine"
+            pushStatus("The AI writers are not responding — switching to the built-in ASME Engine…")
+          }
           setRecovering(true)
           pushStatus(accumulated ? "Connection hiccup — resuming your answer automatically…" : "Reconnecting to the assistant…")
           await wait(Math.min(900 * 2 ** (recoveries - 1), 6_000), controller.signal)
           if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError")
+        }
+
+        // Part 5 deep-dive: the instant Brain answer is on screen; now add AI + web-research analysis below it.
+        if (finished && part5 && !requestMode) {
+          const heading = "\n\n---\n\n## Expert deep-dive · AI analysis with web research\n\n"
+          const base = accumulated
+          accumulated += heading
+          deepStart = accumulated.length
+          flush()
+          finished = false
+          degraded = false
+          recoveries = 0
+          requestMode = "deep"
+          pushStatus("Part 5 deep-dive: reading the Code PDFs and searching papers and code comparisons…")
+          let deepFailure: string | undefined
+          while (!finished) {
+            const result = await runPass(accumulated.slice(deepStart))
+            if (finished) break
+            deepFailure = result.message
+            if (!result.retryable || recoveries >= 1) break
+            recoveries += 1
+            await wait(1_500, controller.signal)
+            if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError")
+          }
+          if (accumulated.length <= deepStart) {
+            // Nothing was written (AI unavailable / not configured): keep the complete instant answer, add a calm note.
+            accumulated = `${base}\n\n---\n\n*The AI deep-dive with web research is unavailable right now (no AI writer or search key responded). The Part 5 answer above is complete and works without AI — use **Ask AI to elaborate** to try again later.*`
+            if (deepFailure) console.warn("Part 5 deep-dive unavailable:", deepFailure)
+          }
+          finished = true
+          deepStart = -1
+          flush()
         }
 
         if (!finished) {

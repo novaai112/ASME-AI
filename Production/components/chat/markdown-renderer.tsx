@@ -5,6 +5,7 @@ import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import rehypeKatex from "rehype-katex"
 import remarkMath from "remark-math"
+import { normalizeMath } from "@/lib/markdown-math"
 import { cn } from "@/lib/utils"
 
 interface MarkdownRendererProps {
@@ -125,7 +126,7 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
         rehypePlugins={[[rehypeKatex, { throwOnError: false }]]}
         components={markdownComponents}
       >
-        {content}
+        {normalizeMath(content)}
       </ReactMarkdown>
     </div>
   )
