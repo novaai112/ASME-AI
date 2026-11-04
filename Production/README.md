@@ -25,6 +25,22 @@ The app requires an existing Nova AI account. Supabase is used for sign-in; the 
 
 The chat backend first asks the Laptop service for relevant passages. The laptop index is built once with `npm run index` in the `Laptop` folder; each passage retains its PDF filename and page. Prompt instructions such as “read,” “explain,” and “PDF” are removed from the retrieval query so they do not outrank engineering terms. Broad Division 2 Part 5 questions retrieve targeted passages for its assessment sections. The AI receives selected passages, not the entire PDF. The laptop does not need to be online for the website to respond: if it cannot be reached, no PDF passages match, keyword coverage is weak, a requested edition comparison is missing an edition, or the user explicitly asks for research, the backend searches ASME-related web sources when Tavily is configured. Without Tavily, the model can still answer, but it must clearly state that Code requirements could not be verified against the PDFs. Web results are clearly supplementary research, never proof of an ASME Code requirement. A browser-level network error means the request did not reach Vercel, so server-side PDF/web fallback cannot run for that request. Answers must not invent clauses, editions, or Code limits; verify engineering decisions against the applicable licensed Code edition.
 
+## Built-in ASME Engine (works when every AI is down)
+
+`lib/asme-engine.ts` is the site's own answer writer. It needs no API key and no network. When every AI provider is out of quota, rejected, timed out, or not configured, the chat route hands the question and whatever PDF passages were retrieved to the engine, which streams back a finished answer instead of an error:
+
+- **Calculators** for Division 1 UG-27 shell/sphere thickness and UG-99/UG-100 test pressure (refuses on unit mismatch or Division 2/3). The same calculator output is also given to the AI models as "verified calculator result" so they do not do the arithmetic themselves.
+- **Reference glossary** of established terms (MAWP, MDMT, PWHT, Part 5 failure modes, stamps, NBIC…), always labelled as general reference, not Code text.
+- **Extractive composer** that ranks sentences from the retrieved PDF passages against the question and writes a cited answer with a source table, flags editions/Divisions that were asked for but not retrieved, and labels the owner's study notes as "not the Code". With no evidence it says it could not verify — it never guesses a clause.
+
+The answer is badged **Built-in ASME Engine** in the UI. `GET /api/status` (signed-in users) reports provider key counts, laptop online/offline and PDF count.
+
+## Division 2 Part 5 Brain (no AI needed)
+
+Any Division 2 Part 5 question (plastic collapse, local failure, buckling, fatigue, ratcheting, creep, bolts…) is answered **instantly with no AI, no network and no quota** by `lib/part5/brain.ts`, using the structured map in `lib/part5/outline.ts` (our own wording, with equation numbers). Under the answer, tap a calculator to open a pop-up that asks for each variable (symbol, name, unit), then shows the worked calculation steps (`lib/part5/calculators.ts`, 16 calculators, every equation checked against the 2025 PDF and unit-tested). **Ask AI to elaborate** re-sends the question to the AI writers (and the built-in engine still catches a failure). Header buttons open the **Part 5 Explorer**, the **Calculators** list and the **System status** panel.
+
+Exact paragraph text ("Full text from my PDF") is read from your own PDF through the laptop service, so the licensed text is never stored in this repository: copy `Laptop/build-part5.mjs` + the new `Laptop/server.mjs` next to your Part 5 PDF and run `npm run part5` once, then restart the service.
+
 ## Deploy to Vercel
 
 1. Push the workspace repository to GitHub. Root ignore rules exclude PDF files, local indexes, secrets, and dependencies.

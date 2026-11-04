@@ -5,7 +5,7 @@
   "scripts": {
     "build": "next build",
     "dev": "next dev",
-    "test:retrieval": "node --experimental-strip-types --test tests/asme-research-fallback.test.mjs",
+    "test:retrieval": "node --experimental-strip-types --test tests/asme-research-fallback.test.mjs tests/asme-engine.test.mjs tests/part5-calculators.test.mjs",
     "lint": "eslint .",
     "start": "next start"
   },
