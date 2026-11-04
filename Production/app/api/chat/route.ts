@@ -11,7 +11,7 @@ import {
   searchLaptopAsmeChunks,
 } from "@/lib/asme-laptop-retrieval"
 import { retrievePdfFirstResearch, shouldSearchAsmeWebFallback } from "@/lib/asme-research-fallback"
-import { composePart5Answer, isPart5Question, matchSections } from "@/lib/part5/brain"
+import { composePart5Answer, isDiv2RuleQuestion, isPart5Question, matchSections } from "@/lib/part5/brain"
 import { composeEngineAnswer, solveCalculation, type EngineReason } from "@/lib/asme-engine"
 
 export const runtime = "nodejs"
@@ -562,9 +562,9 @@ async function searchPart5Research(topic: string, signal: AbortSignal): Promise<
   if (!apiKey) return []
   const t = topic.replace(/\s+/g, " ").trim().slice(0, 160)
   const queries = [
-    `${t} ASME Section VIII Division 2 Part 5 design by analysis research paper WRC bulletin ASME PVP`,
-    `${t} ASME VIII-2 Part 5 compared with EN 13445-3 API 579-1 PD 5500 design by analysis`,
-    `${t} ASME BPVC VIII-2 Part 5 background commentary technical basis journal of pressure vessel technology`,
+    `${t} ASME Section VIII Division 2 research paper WRC bulletin ASME PVP`,
+    `${t} ASME VIII-2 compared with EN 13445-3 API 579-1 PD 5500`,
+    `${t} ASME BPVC VIII-2 background commentary technical basis journal of pressure vessel technology`,
   ]
   const settled = await Promise.allSettled(
     queries.map(async (query) => {
@@ -594,10 +594,10 @@ async function searchPart5Research(topic: string, signal: AbortSignal): Promise<
   return out.slice(0, 10)
 }
 
-const PART5_EXPERT_INSTRUCTIONS = `PART 5 EXPERT MODE (this overrides the earlier rule about keeping web research minimal).
-The reader already has a short, instant summary of the relevant Part 5 paragraphs. Do NOT repeat that summary. Write an advanced engineering deep-dive for a pressure-vessel analyst, in well-formed Markdown, with these sections when they apply:
+const PART5_EXPERT_INSTRUCTIONS = `DIVISION 2 EXPERT MODE (this overrides the earlier rule about keeping web research minimal).
+The reader already has a short, instant summary of the relevant Division 2 paragraphs. Do NOT repeat that summary. Write an advanced engineering deep-dive for a pressure-vessel analyst, in well-formed Markdown, with these sections when they apply:
 ## Engineering basis — why the rule exists and what failure it prevents.
-## Clause-by-clause reading — each relevant Part 5 paragraph and equation, in procedure order. Every equation in $$ ... $$ (never \[ \] or bare brackets), every symbol defined with units, every Code claim cited to the retrieved edition and PDF page like [ASME Sec VIII Div2 2025, page 600].
+## Clause-by-clause reading — each relevant Division 2 paragraph and equation, in procedure order. Every equation in $$ ... $$ (never \[ \] or bare brackets), every symbol defined with units, every Code claim cited to the retrieved edition and PDF page like [ASME Sec VIII Div2 2025, page 600].
 ## Worked example — a short numeric example whose arithmetic you show step by step (use any VERIFIED CALCULATOR RESULT exactly).
 ## Research and literature — summarise what the supplied web sources say (papers, WRC bulletins, conference papers, commentary). Name each source by title with its URL as a Markdown link, and say what it adds or disputes. Use ONLY the supplied web sources; if none are relevant, say that no relevant research could be retrieved. Never invent papers, authors, numbers or URLs.
 ## Comparison with other codes — compare with EN 13445-3, API 579-1/ASME FFS-1, PD 5500 or other standards ONLY where the supplied web sources support it, as a compact table, clearly marked 'supplementary, not Code authority'.
@@ -793,10 +793,10 @@ async function runChat(
 
   // Division 2 Part 5 questions are answered instantly by the Part 5 Brain — no AI, no network, no quota.
   // The user can still ask an AI to elaborate (mode "ai"); that request skips this branch.
-  if (!options.resume && !options.mode && lastMessage?.role === "user" && isPart5Question(lastMessage.content)) {
+  if (!options.resume && !options.mode && lastMessage?.role === "user" && (isPart5Question(lastMessage.content) || isDiv2RuleQuestion(lastMessage.content))) {
     const brain = composePart5Answer(lastMessage.content)
-    emit({ type: "meta", provider: "part5", label: "Part 5 Brain", switched: false })
-    emit({ type: "status", status: "Part 5 Brain is answering from the Division 2 Part 5 map…" })
+    emit({ type: "meta", provider: "part5", label: "Division 2 Brain", switched: false })
+    emit({ type: "status", status: "Division 2 Brain is answering from the structured map…" })
     for (let i = 0; i < brain.markdown.length; i += 600) emit({ type: "text", text: brain.markdown.slice(i, i + 600) })
     emit({ type: "part5", sections: brain.sectionIds, calculators: brain.calculatorIds })
     emit({ type: "done", complete: true })
@@ -809,7 +809,7 @@ async function runChat(
     .map((message) => message.content)
     .join("\n")
   const isDeep = options.mode === "deep"
-  emit({ type: "status", status: isDeep ? "Part 5 deep-dive: searching the Code library and the web…" : "Searching the ASME Code library…" })
+  emit({ type: "status", status: isDeep ? "Deep-dive: searching the Code library and the web…" : "Searching the ASME Code library…" })
 
   // "Continue", "why?", "explain more" carry no ASME terms: search with the previous question too.
   const previousUserQuestion = isExplicitFollowUp(lastMessage.content)
