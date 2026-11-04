@@ -41,6 +41,10 @@ Any Division 2 Part 5 question (plastic collapse, local failure, buckling, fatig
 
 Exact paragraph text ("Full text from my PDF") is read from your own PDF through the laptop service, so the licensed text is never stored in this repository: copy `Laptop/build-part5.mjs` + the new `Laptop/server.mjs` next to your Part 5 PDF and run `npm run part5` once, then restart the service.
 
+## Whole Division 2 library (all nine Parts)
+
+The header **Division 2 Library** lists every section of Parts 1–9 (generated from your 2025 PDF), a detailed offline guide for Part 5, Part 4.3 (shells and heads) and Part 8.2 (test pressure), and **22 calculators**. For *any* section, **Full text from my PDF** and **View PDF pages** (figures, tables, graphs, equations rendered as images) are read live from your own PDF through the laptop service, so no ASME text or figure is stored in this repository. Laptop setup: put `div2.mjs`, `build-div2.mjs`, the new `server.mjs` and `package.json` next to `ASME Sec VIII Div2 2025.pdf`, run `npm run div2` once (about 1–2 minutes), then restart the service.
+
 ## Deploy to Vercel
 
 1. Push the workspace repository to GitHub. Root ignore rules exclude PDF files, local indexes, secrets, and dependencies.
