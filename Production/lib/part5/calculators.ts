@@ -17,18 +17,18 @@ export function fmt(x: number, sig = 5): string {
   if (a >= 1e6 || a < 1e-3) return x.toExponential(Math.max(1, sig - 2)).replace(/e\+?/, "\\times 10^{") + "}"
   return Number(x.toPrecision(sig)).toString()
 }
-const plain = (x: number, sig = 5) => fmt(x, sig).replace(/\\times 10\^\{(-?\d+)\}/, "e$1")
+export const plain = (x: number, sig = 5) => fmt(x, sig).replace(/\\times 10\^\{(-?\d+)\}/, "e$1")
 
-function req(v: Values, key: string, label: string): number {
+export function req(v: Values, key: string, label: string): number {
   const x = v[key]
   if (typeof x !== "number" || !Number.isFinite(x)) throw new Error(`Enter a value for ${label}.`)
   return x
 }
-function opt(v: Values, key: string): number | undefined {
+export function opt(v: Values, key: string): number | undefined {
   const x = v[key]
   return typeof x === "number" && Number.isFinite(x) ? x : undefined
 }
-function sel(v: Values, key: string, fallback: string): string {
+export function sel(v: Values, key: string, fallback: string): string {
   const x = v[key]
   return typeof x === "string" && x ? x : fallback
 }
@@ -36,12 +36,12 @@ function rows(v: Values, key: string): Row[] {
   const x = v[key]
   return Array.isArray(x) ? x.filter((r) => r && Object.values(r).some((n) => Number.isFinite(n))) : []
 }
-function positive(x: number, label: string) {
+export function positive(x: number, label: string) {
   if (!(x > 0)) throw new Error(`${label} must be greater than zero.`)
 }
-const u = (kind: keyof typeof UNIT_LABELS, system: UnitSystem) => UNIT_LABELS[kind][system]
-const out = (): CalcOutput => ({ results: [], steps: [], warnings: [] })
-const num = (key: string, symbol: string, latex: string, label: string, unit: any, extra: Partial<Extract<Field, { kind: "number" }>> = {}): Field => ({
+export const u = (kind: keyof typeof UNIT_LABELS, system: UnitSystem) => UNIT_LABELS[kind][system]
+export const out = (): CalcOutput => ({ results: [], steps: [], warnings: [] })
+export const num = (key: string, symbol: string, latex: string, label: string, unit: any, extra: Partial<Extract<Field, { kind: "number" }>> = {}): Field => ({
   kind: "number", key, symbol, latex, label, unit, ...extra,
 })
 
@@ -50,7 +50,7 @@ export function vonMises(s1: number, s2: number, s3: number): number {
   return (1 / Math.SQRT2) * Math.pow((s1 - s2) ** 2 + (s2 - s3) ** 2 + (s3 - s1) ** 2, 0.5)
 }
 
-const stressNote = "Use one stress unit throughout (the unit switch at the top sets the label)."
+export const stressNote = "Use one stress unit throughout (the unit switch at the top sets the label)."
 
 // ---------------------------------------------------------------------------------------------
 // 5.2.2 — elastic stress analysis

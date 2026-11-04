@@ -8,7 +8,7 @@ export interface Part5Section {
   id: string
   title: string
   page: number // printed page number in the 2025 edition
-  group: "general" | "collapse" | "local" | "buckling" | "cyclic" | "creep" | "supplemental" | "reference"
+  group: "general" | "collapse" | "local" | "buckling" | "cyclic" | "creep" | "supplemental" | "reference" | "rule" | "test"
   summary: string
   points: string[]
   equations: Part5Equation[]
@@ -25,6 +25,8 @@ export const GROUP_LABELS: Record<Part5Section["group"], string> = {
   creep: "Creep",
   supplemental: "Supplemental",
   reference: "Reference",
+  rule: "Part 4 — design by rule",
+  test: "Part 8 — pressure testing",
 }
 
 export const PART5_SECTIONS: Part5Section[] = [

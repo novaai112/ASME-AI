@@ -3,7 +3,10 @@
  * right paragraphs of the structured outline, writes the procedure, lists the equations and offers the calculators.
  */
 import { PART5_SECTIONS, getSection, type Part5Section } from "./outline.ts"
-import { getCalculator } from "./calculators.ts"
+import { DIV2_DETAIL_SECTIONS } from "../div2/outline.ts"
+import { getCalculator } from "../calc-registry.ts"
+
+const ALL_SECTIONS: Part5Section[] = [...PART5_SECTIONS, ...DIV2_DETAIL_SECTIONS]
 
 export interface Part5Answer {
   markdown: string
@@ -12,6 +15,14 @@ export interface Part5Answer {
 }
 
 const PART5_ONLY = /plastic collapse|local failure|local strain|triaxial stress|ratchet|fatigue screening|bree diagram|strain[- ]limit|stress categor|stress classification|design[- ]by[- ]analysis|\bpart\s*5\b|\bS_?PL\b|\bS_?PS\b|fatigue penalty|capacity reduction|creep[- ]fatigue|\b5\.(?:[1-9]|1[0-6])(?:\.\d+){0,4}\b(?!\s*(?:mm|in|psi|mpa|%))/i
+
+/** Division 2 Part 4.3 head/shell thickness and Part 8 test-pressure questions that name Division 2. */
+export function isDiv2RuleQuestion(question: string): boolean {
+  const q = question.slice(0, 1500)
+  if (!/\bdiv(?:ision)?\.?\s*(?:2|two)\b|VIII[- ]?2|BPVC\.VIII\.2/i.test(q)) return false
+  if (/\bdiv(?:ision)?\.?\s*(?:1|3)\b/i.test(q) && !/\bdiv(?:ision)?\.?\s*(?:2|two)\b/i.test(q)) return false
+  return /cylind|cone|conical|sphere|spherical|hemispher|torispherical|ellips|knuckle|head thickness|shell thickness|required thickness|hydro(?:static)?[\s-]*test|pneumatic[\s-]*test|test pressure|\b4\.3\.[1-7]\b|\b8\.[1-4]\b/i.test(q)
+}
 
 /** True when the question is about Division 2 Part 5 (design by analysis). */
 export function isPart5Question(question: string): boolean {
@@ -39,7 +50,7 @@ function score(section: Part5Section, q: string): number {
 }
 
 export function matchSections(question: string, max = 3): Part5Section[] {
-  const scored = PART5_SECTIONS.map((s) => ({ s, n: score(s, question) })).filter((x) => x.n > 0).sort((a, b) => b.n - a.n)
+  const scored = ALL_SECTIONS.map((s) => ({ s, n: score(s, question) })).filter((x) => x.n > 0).sort((a, b) => b.n - a.n)
   if (scored.length === 0) return []
   // General / reference paragraphs only answer when nothing more specific matched.
   const specific = scored.filter((x) => x.s.id !== "5.1" && x.s.group !== "reference")
@@ -71,7 +82,7 @@ export function composePart5Answer(question: string): Part5Answer {
   const sections = matches.length > 0 ? matches : [getSection("5.1")!]
   const calcIds = new Set<string>()
   const out: string[] = []
-  out.push("> **Part 5 Brain** — answered instantly from the structured map of ASME BPVC VIII-2 (2025) Part 5, with no AI. Equations are shown with their numbers; open a calculator to enter the variables and get a worked solution.", "")
+  out.push("> **Division 2 Brain** — answered instantly from the structured map of ASME BPVC VIII-2 (2025), with no AI. Equations are shown with their numbers; open a calculator to enter the variables and get a worked solution.", "")
   if (broad || matches.length === 0) out.push(overview())
 
   for (const s of sections) {
@@ -91,7 +102,7 @@ export function composePart5Answer(question: string): Part5Answer {
     out.push("", "Tap a calculator card below this answer to enter the variables (name, symbol and units are shown for each) and get the worked calculation.", "")
   }
   out.push(
-    "*This is a structured guide written in our own words from the 2025 Part 5 text, not a reproduction of it. Open **Full text** in the Part 5 Explorer to read the exact paragraph from your own PDF, and always confirm against the licensed Code edition that governs your project.*",
+    "*This is a structured guide written in our own words from the 2025 Division 2 text, not a reproduction of it. Open **Full text** or **View PDF pages** in the Division 2 Library to read the exact paragraph from your own PDF, and always confirm against the licensed Code edition that governs your project.*",
   )
   return { markdown: out.join("\n"), sectionIds: sections.map((s) => s.id), calculatorIds: [...calcIds] }
 }
