@@ -11,6 +11,8 @@ import {
   searchLaptopAsmeChunks,
 } from "@/lib/asme-laptop-retrieval"
 import { retrievePdfFirstResearch, shouldSearchAsmeWebFallback } from "@/lib/asme-research-fallback"
+import { composePart5Answer, isPart5Question } from "@/lib/part5/brain"
+import { composeEngineAnswer, solveCalculation, type EngineReason } from "@/lib/asme-engine"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -68,6 +70,7 @@ type StreamEvent =
   | { type: "text"; text: string }
   | { type: "meta"; provider: string; label: string; switched: boolean }
   | { type: "done"; complete: boolean; degraded?: boolean; reason?: string }
+  | { type: "part5"; sections: string[]; calculators: string[] }
   | { type: "error"; error: string; retryable?: boolean }
 type ProviderCandidate = { provider: ProviderId; model: string; label: string }
 
@@ -724,37 +727,26 @@ function continuationNote(answer: string): string {
   return `\n\nCONTINUATION INSTRUCTIONS: Another writer already produced the first part of this same answer and was interrupted. Continue the SAME answer from exactly where it stops. Do not restart, do not greet, do not repeat any heading or point already written, and do not add a new introduction. If the last sentence is unfinished, finish it first. Cover every section still missing, then end with a clear conclusion.\nHeadings already written:\n${headings || "(none)"}\nThe answer so far ends with:\n<<<\n${answer.slice(-5000)}\n>>>`
 }
 
-/** Used only when no AI writer can run: a clean, cited digest of the matching PDF passages. */
-function buildSourceDigest(chunks: AsmeChunk[], web: WebSource[]): string {
-  const lines: string[] = [
-    "### Source passages found for your question",
-    "",
-    "The AI writers are all busy for a moment, so here are the most relevant passages from your ASME library, in page order. Send your question again in a minute for a full written explanation.",
-    "",
-  ]
-  const ordered = [...chunks].sort((a, b) => a.source.localeCompare(b.source) || a.page - b.page).slice(0, 12)
-  for (const chunk of ordered) {
-    const clause = chunk.clause ? ` · ${chunk.clause}` : ""
-    const snippet = chunk.text.replace(/\s+/g, " ").trim().slice(0, 420)
-    lines.push(`**${chunk.source.replace(/\.pdf$/i, "")}, page ${chunk.page}${clause}**`, "", `> ${snippet}${chunk.text.length > 420 ? "…" : ""}`, "")
-  }
-  if (web.length > 0) {
-    lines.push("**Supplementary web research (not Code authority)**", "")
-    for (const source of web.slice(0, 4)) lines.push(`- [${source.title}](${source.url})`)
-    lines.push("")
-  }
-  lines.push("*Excerpts are shortened. Verify against the licensed Code edition that governs your project.*")
-  return lines.join("\n")
-}
-
 async function runChat(
   messages: ChatMessage[],
   model: string,
   emit: (event: StreamEvent) => void,
   signal: AbortSignal,
-  options: { resume: string; deadlineAt: number },
+  options: { resume: string; deadlineAt: number; mode?: string },
 ) {
   const lastMessage = messages[messages.length - 1]
+
+  // Division 2 Part 5 questions are answered instantly by the Part 5 Brain — no AI, no network, no quota.
+  // The user can still ask an AI to elaborate (mode "ai"); that request skips this branch.
+  if (!options.resume && options.mode !== "ai" && lastMessage?.role === "user" && isPart5Question(lastMessage.content)) {
+    const brain = composePart5Answer(lastMessage.content)
+    emit({ type: "meta", provider: "part5", label: "Part 5 Brain", switched: false })
+    emit({ type: "status", status: "Part 5 Brain is answering from the Division 2 Part 5 map…" })
+    for (let i = 0; i < brain.markdown.length; i += 600) emit({ type: "text", text: brain.markdown.slice(i, i + 600) })
+    emit({ type: "part5", sections: brain.sectionIds, calculators: brain.calculatorIds })
+    emit({ type: "done", complete: true })
+    return
+  }
   const relevantConversation = getRelevantConversation(messages)
   const webQuery = relevantConversation
     .filter((message) => message.role === "user")
@@ -970,8 +962,13 @@ async function runChat(
         },
       })
     : ""
+  // Deterministic arithmetic from the built-in engine: models are told to use these numbers instead of doing the maths themselves.
+  const engineCalc = solveCalculation(lastMessage.content)
   const documentContext = [
     asmeContext,
+    engineCalc
+      ? `\n\nVERIFIED CALCULATOR RESULT (computed by software, not a model; reproduce these numbers exactly, show the working, and keep the Division 1 vs Division 2 caveat): ${engineCalc.summary}`
+      : "",
     uploadedPdf ? `\n\nUser-uploaded PDF passages:\n${uploadedPdf}` : "",
     parsedImage ? `\n\nNemotron Parse extraction from the user-uploaded image (verify against the source image):\n${parsedImage}` : "",
   ].join("")
@@ -1143,23 +1140,45 @@ async function runChat(
     return
   }
 
+  const configuredProviders = PROVIDERS.filter((provider) => getProviderKeys(provider).length > 0)
+  const engineReason: EngineReason = configuredProviders.length === 0 ? "no-provider-configured" : "providers-down"
+  const engineQuestion = [previousUserQuestion.slice(0, 400), lastMessage.content].filter(Boolean).join("\n")
+  const runEngine = (reason: EngineReason, continuing: boolean) => {
+    emit({ type: "meta", provider: "engine", label: "ASME Engine", switched: startedLength > 0 || lastLabel !== "" })
+    emit({
+      type: "status",
+      status: continuing
+        ? "AI writers stopped early; the built-in ASME Engine is adding the remaining source evidence…"
+        : "All AI writers are unavailable — the built-in ASME Engine is answering directly from your Code library…",
+    })
+    writeText(
+      (continuing ? "\n\n" : "") +
+        composeEngineAnswer({
+          question: engineQuestion,
+          chunks: relevantChunks,
+          web: webSources.map(({ title, url }) => ({ title, url })),
+          reason,
+          continuing,
+        }),
+    )
+    emit({ type: "done", complete: true, degraded: true })
+  }
+
   if (answer.length > startedLength || options.resume) {
-    // Partial answer on screen. Tell the browser to resume rather than showing an error.
+    // Partial answer on screen. Let the browser resume first; if a resume attempt also finds every provider
+    // down, finish with the built-in engine instead of leaving the answer paused.
+    if (options.resume && Date.now() < modelDeadline) {
+      runEngine("resume-incomplete", true)
+      return
+    }
     emit({ type: "done", complete: false, reason: Date.now() >= modelDeadline ? "deadline" : "providers" })
     return
   }
 
-  console.error("All AI providers failed for this request.")
-  if (relevantChunks.length > 0 || webSources.length > 0) {
-    writeText(buildSourceDigest(relevantChunks, webSources))
-    emit({ type: "done", complete: true, degraded: true })
-    return
-  }
-  emit({
-    type: "error",
-    retryable: true,
-    error: "The AI writers are busy for a moment. Trying again automatically…",
-  })
+  console.error("All AI providers failed for this request; answering with the built-in ASME Engine.")
+  // Never leave the user with an error: the engine always produces a sourced answer, a calculation,
+  // or an honest "could not verify" message with next steps.
+  runEngine(engineReason, false)
 }
 
 export async function POST(request: NextRequest) {
@@ -1168,13 +1187,13 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "Request body is too large." }, { status: 413 })
   }
 
-  let body: { messages?: ChatMessage[]; model?: string; resume?: unknown }
+  let body: { messages?: ChatMessage[]; model?: string; resume?: unknown; mode?: unknown }
   try {
     const parsedBody = await readJsonBody(request)
     if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
       return Response.json({ error: "Request body must be a JSON object." }, { status: 400 })
     }
-    body = parsedBody as { messages?: ChatMessage[]; model?: string; resume?: unknown }
+    body = parsedBody as { messages?: ChatMessage[]; model?: string; resume?: unknown; mode?: unknown }
   } catch (error) {
     if (error instanceof RangeError) return Response.json({ error: error.message }, { status: 413 })
     return Response.json({ error: "Request body must be valid JSON." }, { status: 400 })
@@ -1305,6 +1324,7 @@ export async function POST(request: NextRequest) {
 
       void runChat(messages, body.model ?? "", emit, operationSignal, {
         resume: resumeText,
+        mode: typeof body.mode === "string" ? body.mode : undefined,
         deadlineAt: startedAt + CHAT_REQUEST_DEADLINE_MS,
       })
         .catch((error: unknown) => {
