@@ -11,7 +11,7 @@ import {
   searchLaptopAsmeChunks,
 } from "@/lib/asme-laptop-retrieval"
 import { retrievePdfFirstResearch, shouldSearchAsmeWebFallback } from "@/lib/asme-research-fallback"
-import { composePart5Answer, isPart5Question } from "@/lib/part5/brain"
+import { composePart5Answer, isPart5Question, matchSections } from "@/lib/part5/brain"
 import { composeEngineAnswer, solveCalculation, type EngineReason } from "@/lib/asme-engine"
 
 export const runtime = "nodejs"
@@ -314,11 +314,11 @@ async function readJsonBody(request: NextRequest): Promise<unknown> {
   return JSON.parse(new TextDecoder().decode(bytes)) as unknown
 }
 
-function makeChatHistory(messages: ChatMessage[], pdfText: string, webSources: WebSource[]): Array<Record<string, unknown>> {
+function makeChatHistory(messages: ChatMessage[], pdfText: string, webSources: WebSource[], webLabel = "ASME web research fallback (not Code authority; use only if PDF excerpts are unavailable or materially insufficient, and label it clearly)"): Array<Record<string, unknown>> {
   const supplementalContext = [
     pdfText ? `\n\nUploaded document excerpts:\n${pdfText}` : "",
     webSources.length
-      ? `\n\nASME web research fallback (not Code authority; use only if PDF excerpts are unavailable or materially insufficient, and label it clearly):\n${webSources
+      ? `\n\n${webLabel}:\n${webSources
           .map((source) => `[${source.title}] ${source.url}\n${source.content}`)
           .join("\n\n")}`
       : "",
@@ -555,6 +555,61 @@ async function searchWeb(query: string, signal: AbortSignal): Promise<WebSource[
     .map((item) => ({ title: item.title, url: item.url, content: item.content.slice(0, 3_000) }))
 }
 
+
+/** Part 5 deep-dive research: papers/commentary on the topic plus comparisons with other codes. */
+async function searchPart5Research(topic: string, signal: AbortSignal): Promise<WebSource[]> {
+  const apiKey = process.env.TAVILY_API_KEY
+  if (!apiKey) return []
+  const t = topic.replace(/\s+/g, " ").trim().slice(0, 160)
+  const queries = [
+    `${t} ASME Section VIII Division 2 Part 5 design by analysis research paper WRC bulletin ASME PVP`,
+    `${t} ASME VIII-2 Part 5 compared with EN 13445-3 API 579-1 PD 5500 design by analysis`,
+    `${t} ASME BPVC VIII-2 Part 5 background commentary technical basis journal of pressure vessel technology`,
+  ]
+  const settled = await Promise.allSettled(
+    queries.map(async (query) => {
+      const response = await fetch("https://api.tavily.com/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: apiKey, query, search_depth: "advanced", max_results: 6, include_answer: false }),
+        signal,
+      })
+      if (!response.ok) { await response.body?.cancel(); throw new Error(`Web search returned HTTP ${response.status}.`) }
+      const payload = (await response.json()) as { results?: Array<{ title?: string; url?: string; content?: string }> }
+      return (payload.results ?? []).filter((r): r is { title: string; url: string; content: string } => Boolean(r.title && r.url && r.content))
+    }),
+  )
+  if (signal.aborted) throw signal.reason
+  const seen = new Set<string>()
+  const out: WebSource[] = []
+  for (const result of settled) {
+    if (result.status !== "fulfilled") continue
+    for (const item of result.value) {
+      if (seen.has(item.url)) continue
+      if (!/\b(ASME|BPVC|Section\s*VIII|VIII-?2|pressure vessel|EN\s*13445|API\s*579|WRC|design[- ]by[- ]analysis)\b/i.test(`${item.title} ${item.content}`)) continue
+      seen.add(item.url)
+      out.push({ title: item.title, url: item.url, content: item.content.slice(0, 1_800) })
+    }
+  }
+  return out.slice(0, 10)
+}
+
+const PART5_EXPERT_INSTRUCTIONS = `PART 5 EXPERT MODE (this overrides the earlier rule about keeping web research minimal).
+The reader already has a short, instant summary of the relevant Part 5 paragraphs. Do NOT repeat that summary. Write an advanced engineering deep-dive for a pressure-vessel analyst, in well-formed Markdown, with these sections when they apply:
+## Engineering basis — why the rule exists and what failure it prevents.
+## Clause-by-clause reading — each relevant Part 5 paragraph and equation, in procedure order. Every equation in $$ ... $$ (never \[ \] or bare brackets), every symbol defined with units, every Code claim cited to the retrieved edition and PDF page like [ASME Sec VIII Div2 2025, page 600].
+## Worked example — a short numeric example whose arithmetic you show step by step (use any VERIFIED CALCULATOR RESULT exactly).
+## Research and literature — summarise what the supplied web sources say (papers, WRC bulletins, conference papers, commentary). Name each source by title with its URL as a Markdown link, and say what it adds or disputes. Use ONLY the supplied web sources; if none are relevant, say that no relevant research could be retrieved. Never invent papers, authors, numbers or URLs.
+## Comparison with other codes — compare with EN 13445-3, API 579-1/ASME FFS-1, PD 5500 or other standards ONLY where the supplied web sources support it, as a compact table, clearly marked 'supplementary, not Code authority'.
+## Common pitfalls and verification checklist — specific, practical items (units, load combinations, categorisation, edition and Code Case checks).
+Web sources are never Code authority: never present a web statement as a Code requirement. If the PDF excerpts do not contain a clause, say it could not be verified from the supplied PDFs. Keep it dense and professional; no filler, no repeated boilerplate, finish with a clear conclusion.`
+
+function matchSectionsForTopic(question: string): string {
+  const sections = matchSections(question, 2)
+  const names = sections.map((section) => section.title.toLowerCase()).join(" and ")
+  return names || question.replace(/\s+/g, " ").slice(0, 80)
+}
+
 function describeProviderFailure(provider: ProviderId, status: number): string {
   const name =
     provider === "google" ? "Gemini" :
@@ -738,7 +793,7 @@ async function runChat(
 
   // Division 2 Part 5 questions are answered instantly by the Part 5 Brain — no AI, no network, no quota.
   // The user can still ask an AI to elaborate (mode "ai"); that request skips this branch.
-  if (!options.resume && options.mode !== "ai" && lastMessage?.role === "user" && isPart5Question(lastMessage.content)) {
+  if (!options.resume && !options.mode && lastMessage?.role === "user" && isPart5Question(lastMessage.content)) {
     const brain = composePart5Answer(lastMessage.content)
     emit({ type: "meta", provider: "part5", label: "Part 5 Brain", switched: false })
     emit({ type: "status", status: "Part 5 Brain is answering from the Division 2 Part 5 map…" })
@@ -753,7 +808,8 @@ async function runChat(
     .slice(-2)
     .map((message) => message.content)
     .join("\n")
-  emit({ type: "status", status: "Searching the ASME Code library…" })
+  const isDeep = options.mode === "deep"
+  emit({ type: "status", status: isDeep ? "Part 5 deep-dive: searching the Code library and the web…" : "Searching the ASME Code library…" })
 
   // "Continue", "why?", "explain more" carry no ASME terms: search with the previous question too.
   const previousUserQuestion = isExplicitFollowUp(lastMessage.content)
@@ -844,6 +900,15 @@ async function runChat(
       return retrieval.passages
     },
     async () => {
+      if (isDeep) {
+        if (!process.env.TAVILY_API_KEY) {
+          emit({ type: "status", status: "Web research is not configured (TAVILY_API_KEY), so the deep-dive uses the PDF evidence only." })
+          return []
+        }
+        const topic = matchSectionsForTopic(lastMessage.content)
+        emit({ type: "status", status: `Searching research papers and code comparisons for ${topic}…` })
+        return searchPart5Research(topic, signal)
+      }
       if (!isAsmeRelatedQuestion(webQuery)) return []
       if (!process.env.TAVILY_API_KEY) {
         emit({
@@ -859,7 +924,7 @@ async function runChat(
       return searchWeb(webQuery, signal)
     },
     (pdfEvidence, pdfUnavailable) =>
-      isAsmeRelatedQuestion(webQuery) && shouldSearchAsmeWebFallback(webQuery, pdfEvidence, pdfUnavailable),
+      isDeep || (isAsmeRelatedQuestion(webQuery) && shouldSearchAsmeWebFallback(webQuery, pdfEvidence, pdfUnavailable)),
   )
 
   if (research.pdfUnavailable) {
@@ -964,7 +1029,10 @@ async function runChat(
     : ""
   // Deterministic arithmetic from the built-in engine: models are told to use these numbers instead of doing the maths themselves.
   const engineCalc = solveCalculation(lastMessage.content)
+  const part5Map = isDeep ? composePart5Answer(lastMessage.content) : null
   const documentContext = [
+    isDeep ? `\n\n${PART5_EXPERT_INSTRUCTIONS}` : "",
+    part5Map ? `\n\nSTRUCTURED PART 5 MAP of the paragraphs relevant to this question (already shown to the reader; use for accuracy, do not repeat):\n${part5Map.markdown.slice(0, 9_000)}` : "",
     asmeContext,
     engineCalc
       ? `\n\nVERIFIED CALCULATOR RESULT (computed by software, not a model; reproduce these numbers exactly, show the working, and keep the Division 1 vs Division 2 caveat): ${engineCalc.summary}`
@@ -973,7 +1041,7 @@ async function runChat(
     parsedImage ? `\n\nNemotron Parse extraction from the user-uploaded image (verify against the source image):\n${parsedImage}` : "",
   ].join("")
   const webContext = webSources.length
-    ? `\n\nASME web research fallback (not Code authority; use only if PDF excerpts are unavailable or materially insufficient, and label it clearly):\n${webSources
+    ? `\n\n${isDeep ? "Web research for the Part 5 deep-dive — papers, commentary and other-code comparisons (not Code authority; cite each by title and URL and compare against the PDF excerpts):" : "ASME web research fallback (not Code authority; use only if PDF excerpts are unavailable or materially insufficient, and label it clearly):"}\n${webSources
         .map((source) => `[${source.title}] ${source.url}\n${source.content}`)
         .join("\n\n")}`
     : ""
@@ -1019,7 +1087,7 @@ async function runChat(
   const attempt = async (candidate: ProviderCandidate, apiKey: string): Promise<Outcome> => {
     const continuing = answer.length > 0
     const extra = continuing ? continuationNote(answer) : ""
-    const history = makeChatHistory(relevantConversation, `${documentContext}${extra}`, webSources)
+    const history = makeChatHistory(relevantConversation, `${documentContext}${extra}`, webSources, isDeep ? "Web research for the Part 5 deep-dive — papers, commentary and other-code comparisons (not Code authority; cite each by title and URL)" : undefined)
     const controller = new AbortController()
     const attemptSignal = AbortSignal.any([signal, controller.signal])
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -1102,7 +1170,8 @@ async function runChat(
 
   let finished = false
   let idleRounds = 0
-  while (!finished && Date.now() < modelDeadline && attempts < MAX_ATTEMPTS_PER_REQUEST) {
+  const skipProviders = options.mode === "engine"
+  while (!skipProviders && !finished && Date.now() < modelDeadline && attempts < MAX_ATTEMPTS_PER_REQUEST) {
     const pool = buildPool(idleRounds > 0)
     let progressed = false
     for (const { candidate, apiKey } of pool) {
@@ -1162,6 +1231,12 @@ async function runChat(
         }),
     )
     emit({ type: "done", complete: true, degraded: true })
+  }
+
+  if (isDeep && answer.length === startedLength && !options.resume) {
+    // Nothing was written: the quick Part 5 answer is already on screen, so just say the deep-dive is unavailable.
+    emit({ type: "done", complete: true, degraded: true, reason: "deep-unavailable" })
+    return
   }
 
   if (answer.length > startedLength || options.resume) {
