@@ -122,3 +122,45 @@ test("part 5 routing and answer", () => {
   assert.ok(a.sectionIds.includes("5.5.5")); assert.ok(a.calculatorIds.includes("ratcheting-a"))
   assert.match(a.markdown, /Eq\. \(5\.96\)/)
 })
+
+import { runCalculator as runAny, ALL_CALCULATORS, getCalculator as getAny } from "../lib/calc-registry.ts"
+import { torisphericalPressure } from "../lib/div2/calculators.ts"
+import { isDiv2RuleQuestion } from "../lib/part5/brain.ts"
+
+test("Division 2 cylinder / sphere / cone (eq 4.3.1, 4.3.4, 4.3.2) and the rearranged pressure", () => {
+  const cyl = res(runAny("div2-cylinder", { mode: "t", D: 1000, S: 138, E: 1, P: 2, CA: 3 }, "SI"))
+  near(Number(cyl.results[0].value), 7.2991, 1e-3); near(Number(cyl.results[1].value), 10.2991, 1e-3)
+  near(Number(res(runAny("div2-sphere", { mode: "t", D: 1000, S: 138, E: 1, P: 2 }, "SI")).results[0].value), 3.6363, 1e-3)
+  near(Number(res(runAny("div2-cone", { mode: "t", D: 1000, S: 138, E: 1, P: 2, alpha: 30 }, "SI")).results[0].value), 8.4283, 1e-3)
+  // inverse: thickness 7.2991 should give back ~2 MPa
+  near(Number(res(runAny("div2-cylinder", { mode: "P", D: 1000, S: 138, E: 1, t: 7.2991413816 }, "SI")).results[0].value), 2, 1e-4)
+})
+
+test("torispherical head procedure 4.3.6 matches an independent calculation", () => {
+  const r = torisphericalPressure({ D: 2000, L: 2000, r: 200, t: 12, S: 138, E: 1, ET: 200000, C3: 240 })
+  near(r.beta, 1.1102, 1e-3); near(r.Rth, 1047.28, 1e-3); near(r.C1, 0.6742, 1e-3); near(r.Peth, 47.739, 2e-3); near(r.Py, 1.416, 2e-3)
+  near(r.Pak, 1.895, 2e-3); near(r.Pac, 1.651, 2e-3); near(r.Pa, 1.651, 2e-3)
+  const o = res(runAny("div2-torispherical", { D: 2000, L: 2000, r: 200, t: 12, S: 138, E: 1, ET: 200000, c3: "sy", Sy: 240, P: 1.5 }, "SI"))
+  assert.equal(o.verdict.ok, true)
+  assert.equal(res(runAny("div2-torispherical", { D: 2000, L: 2000, r: 200, t: 12, S: 138, E: 1, ET: 200000, c3: "sy", Sy: 240, P: 2.0 }, "SI")).verdict.ok, false)
+  assert.equal(runAny("div2-torispherical", { D: 2000, L: 1000, r: 200, t: 12, S: 138, E: 1, ET: 200000, c3: "sy", Sy: 240 }, "SI").output.verdict.ok, false) // L/D outside 0.7-1.0
+})
+
+test("ellipsoidal 2:1 head and its k limit", () => {
+  const o = res(runAny("div2-ellipsoidal", { D: 2000, h: 500, t: 12, S: 138, E: 1, ET: 200000, c3: "sy", Sy: 240 }, "SI")) // k = 2
+  assert.match(o.results[0].label, /Aspect ratio/); assert.equal(o.results[0].status, "pass")
+  assert.equal(res(runAny("div2-ellipsoidal", { D: 2000, h: 300, t: 12, S: 138, E: 1, ET: 200000, c3: "sy", Sy: 240 }, "SI")).verdict.ok, false) // k = 3.3
+})
+
+test("Division 2 test pressure eq 8.1 (Table 4.1.3 factors)", () => {
+  near(Number(res(runAny("div2-test-pressure", { medium: "hydro", MAWP: 2, St: 138, S: 120 }, "SI")).results[1].value), 1.25 * 2 * (138 / 120))
+  near(Number(res(runAny("div2-test-pressure", { medium: "pneu", MAWP: 300, St: 20, S: 20, MDMT: -20 }, "US")).results[1].value), 345)
+})
+
+test("registry and Div 2 question routing", () => {
+  assert.ok(ALL_CALCULATORS.length >= 22); assert.ok(getAny("div2-torispherical") && getAny("von-mises"))
+  assert.equal(isDiv2RuleQuestion("Division 2 torispherical head thickness"), true)
+  assert.equal(isDiv2RuleQuestion("Division 1 UG-27 cylinder thickness"), false)
+  assert.equal(isDiv2RuleQuestion("hydrotest pressure"), false)
+  assert.equal(isDiv2RuleQuestion("what is the hydrostatic test pressure in Division 2"), true)
+})
