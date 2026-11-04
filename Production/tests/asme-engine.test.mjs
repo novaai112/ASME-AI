@@ -62,3 +62,10 @@ test("glossary + source labelling", () => {
   assert.equal(lookupGlossary("what is MAWP")[0].id, "mawp")
   assert.deepEqual(describeSource("ASME Sec VIII Div3 2025.pdf"), { title: "ASME Sec VIII Div3 2025", division: "3", edition: "2025", isNotes: false })
 })
+
+test("UG-27 overview question is answered with no PDF evidence and no AI", () => {
+  const out = composeEngineAnswer({ question: "How is minimum required thickness of a cylindrical shell under internal pressure determined in Division 1 (UG-27)?", chunks: [], reason: "providers-down" })
+  assert.match(out, /UG-27/)
+  assert.match(out, /SE-0\.6P/)
+  assert.doesNotMatch(out, /could not verify/i)
+})
