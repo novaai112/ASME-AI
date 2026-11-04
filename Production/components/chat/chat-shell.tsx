@@ -553,7 +553,7 @@ export function ChatShell() {
           )}
           <div className="absolute right-3 top-3 flex items-center gap-2">
             {([
-              { label: "Part 5 Explorer", icon: BookOpen, onClick: () => { setExplorerTab("guide"); openExplorer() } },
+              { label: "Division 2 Library", icon: BookOpen, onClick: () => { setExplorerTab("guide"); openExplorer() } },
               { label: "Calculators", icon: Calculator, onClick: () => { setExplorerTab("calculators"); setExplorerSection(null); setExplorerOpen(true) } },
               { label: "System status", icon: Activity, onClick: () => setStatusOpen(true) },
             ] as const).map(({ label, icon: Icon, onClick }) => (

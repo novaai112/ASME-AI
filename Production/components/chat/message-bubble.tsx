@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 import { BookMarked, Brain, Calculator, Check, Copy, Cpu, FileText, Sparkles, User } from "lucide-react"
-import { getCalculator } from "@/lib/part5/calculators"
+import { getCalculator } from "@/lib/calc-registry"
 import Image from "next/image"
 import { cn } from "@/lib/utils"
 import type { Message } from "./chat-shell"
@@ -35,7 +35,7 @@ export function MessageBubble({ message, isStreaming = false, userAvatarUrl, onO
   const isUser = message.role === "user"
   const [copied, setCopied] = useState(false)
   const isEngine = message.model === "ASME Engine"
-  const isBrain = message.model === "Part 5 Brain"
+  const isBrain = message.model === "Division 2 Brain" || message.model === "Part 5 Brain"
   const part5Calcs = (message.part5?.calculators ?? []).map((id) => getCalculator(id)).filter((c): c is NonNullable<ReturnType<typeof getCalculator>> => Boolean(c))
   const sources = !isUser && !isStreaming ? extractSources(message.content) : []
 
@@ -97,7 +97,7 @@ export function MessageBubble({ message, isStreaming = false, userAvatarUrl, onO
               title={isEngine ? "Written by the built-in engine directly from your ASME PDFs — no external AI was needed." : undefined}
             >
               {isEngine ? <Cpu className="size-3" aria-hidden="true" /> : isBrain ? <Brain className="size-3" aria-hidden="true" /> : <Sparkles className="size-3 text-emerald-600" aria-hidden="true" />}
-              {isEngine ? "Built-in ASME Engine" : isBrain ? "Part 5 Brain · no AI" : message.model}
+              {isEngine ? "Built-in ASME Engine" : isBrain ? "Division 2 Brain · no AI" : message.model}
               {message.switched ? " · auto-switched" : ""}
             </span>
           )}
@@ -119,7 +119,7 @@ export function MessageBubble({ message, isStreaming = false, userAvatarUrl, onO
               </>
             )}
             <div className="flex flex-wrap gap-2 pt-1">
-              <button type="button" onClick={() => onOpenExplorer?.(message.part5?.sections?.[0])} className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-xs font-medium text-stone-700 ring-1 ring-stone-300 hover:bg-stone-100"><BookMarked className="size-3.5" aria-hidden="true" />Part 5 Explorer &amp; full text</button>
+              <button type="button" onClick={() => onOpenExplorer?.(message.part5?.sections?.[0])} className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-xs font-medium text-stone-700 ring-1 ring-stone-300 hover:bg-stone-100"><BookMarked className="size-3.5" aria-hidden="true" />Division 2 Library &amp; full text</button>
               <button type="button" onClick={() => onElaborate?.(message)} className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-xs font-medium text-stone-700 ring-1 ring-stone-300 hover:bg-stone-100"><Sparkles className="size-3.5 text-emerald-600" aria-hidden="true" />Ask AI to elaborate</button>
             </div>
           </div>
