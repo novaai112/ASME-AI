@@ -4,7 +4,7 @@ import { AlertTriangle, CheckCircle2, Info, Plus, RotateCcw, Trash2, XCircle, Ca
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
-import { getCalculator, runCalculator } from "@/lib/part5/calculators"
+import { getCalculator, runCalculator } from "@/lib/calc-registry"
 import { UNIT_LABELS, type CalcOutput, type Field, type Row, type UnitSystem, type Values } from "@/lib/part5/types"
 import { Math } from "./math"
 

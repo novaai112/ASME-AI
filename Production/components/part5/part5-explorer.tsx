@@ -1,14 +1,51 @@
 "use client"
 
-import { BookOpen, ChevronLeft, FileText, Loader2, Search, Sparkles, Calculator as CalcIcon } from "lucide-react"
+import { BookOpen, ChevronLeft, ChevronRight, ExternalLink, FileText, ImageIcon, Loader2, Search, Sparkles, Calculator as CalcIcon } from "lucide-react"
 import { useEffect, useMemo, useState } from "react"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
-import { getCalculator, PART5_CALCULATORS } from "@/lib/part5/calculators"
+import { ALL_CALCULATORS, getCalculator } from "@/lib/calc-registry"
+import { DIV2_DETAIL_SECTIONS } from "@/lib/div2/outline"
+import { DIV2_PARTS, DIV2_TOC, type Div2TocEntry } from "@/lib/div2/toc"
 import { GROUP_LABELS, PART5_SECTIONS, type Part5Section } from "@/lib/part5/outline"
 import { Math } from "./math"
 
-type Tab = "guide" | "calculators"
+type Tab = "guide" | "calculators" | "all"
+const DETAILED = [...DIV2_DETAIL_SECTIONS, ...PART5_SECTIONS]
+
+
+/** Page image rendered from the owner's own PDF (figures, tables, graphs, equations). */
+function PageViewer({ start, onClose }: { start: number; onClose?: () => void }) {
+  const [page, setPage] = useState(start)
+  const [state, setState] = useState<"loading" | "ok" | "error">("loading")
+  const src = `/api/div2/page?printed=${page}`
+  useEffect(() => setPage(start), [start])
+  useEffect(() => setState("loading"), [page])
+  return (
+    <div className="space-y-2 rounded-xl bg-stone-100 p-2 ring-1 ring-stone-200">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5">
+          <button type="button" aria-label="Previous page" onClick={() => setPage((p) => globalThis.Math.max(1, p - 1))} className="rounded-lg bg-white p-1.5 ring-1 ring-stone-300 hover:bg-stone-50"><ChevronLeft className="size-4" aria-hidden="true" /></button>
+          <label className="flex items-center gap-1 text-xs text-stone-600">Page
+            <input inputMode="numeric" value={page} onChange={(e) => { const n = Number(e.target.value.replace(/\D/g, "")); if (n >= 1 && n <= 950) setPage(n) }} aria-label="Printed page number" className="w-14 rounded-lg border border-stone-300 bg-white px-2 py-1 text-center text-sm" />
+          </label>
+          <button type="button" aria-label="Next page" onClick={() => setPage((p) => globalThis.Math.min(950, p + 1))} className="rounded-lg bg-white p-1.5 ring-1 ring-stone-300 hover:bg-stone-50"><ChevronRight className="size-4" aria-hidden="true" /></button>
+        </div>
+        <div className="flex items-center gap-2">
+          <a href={src} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline"><ExternalLink className="size-3.5" aria-hidden="true" />Open full size</a>
+          {onClose && <button type="button" onClick={onClose} className="text-xs text-stone-500 hover:text-stone-800">Close</button>}
+        </div>
+      </div>
+      <div className="relative min-h-40 overflow-auto rounded-lg bg-white">
+        {state === "loading" && <div className="absolute inset-0 flex items-center justify-center text-sm text-stone-400"><Loader2 className="mr-2 size-4 animate-spin" aria-hidden="true" />Rendering page from your PDF…</div>}
+        {state === "error" && <p role="alert" className="p-4 text-sm text-amber-800">The page image is unavailable — the laptop service must be online with the Division 2 PDF (see README).</p>}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img key={page} src={src} alt={`Division 2 printed page ${page}`} onLoad={() => setState("ok")} onError={() => setState("error")} className={cn("h-auto w-full", state !== "ok" && "opacity-0")} />
+      </div>
+      <p className="text-[11px] text-stone-400">Rendered live from your own licensed PDF on the laptop — not stored on the website.</p>
+    </div>
+  )
+}
 
 export function Part5Explorer({
   open, onClose, initialSectionId, initialTab = "guide", onOpenCalculator, onElaborate,
@@ -22,28 +59,31 @@ export function Part5Explorer({
 }) {
   const [query, setQuery] = useState("")
   const [selected, setSelected] = useState<Part5Section | null>(null)
+  const [toc, setToc] = useState<Div2TocEntry | null>(null)
+  const [pageNo, setPageNo] = useState<number | null>(null)
+  const [viewPage, setViewPage] = useState<number | null>(null)
   const [tab, setTab] = useState<Tab>("guide")
   const [text, setText] = useState<{ state: "idle" | "loading" | "ok" | "error"; body?: string; error?: string }>({ state: "idle" })
 
   useEffect(() => {
-    if (open) { setSelected(initialSectionId ? PART5_SECTIONS.find((s) => s.id === initialSectionId) ?? null : null); setTab(initialTab) }
+    if (open) { setSelected(initialSectionId ? DETAILED.find((s) => s.id === initialSectionId) ?? null : null); setTab(initialTab) }
   }, [open, initialSectionId, initialTab])
-  useEffect(() => setText({ state: "idle" }), [selected])
+  useEffect(() => { setText({ state: "idle" }); setViewPage(null) }, [selected, toc])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
-    if (!q) return PART5_SECTIONS
-    return PART5_SECTIONS.filter((s) => `${s.id} ${s.title} ${s.summary} ${s.points.join(" ")} ${s.equations.map((e) => e.no + " " + e.meaning).join(" ")}`.toLowerCase().includes(q))
+    if (!q) return DETAILED
+    return DETAILED.filter((s) => `${s.id} ${s.title} ${s.summary} ${s.points.join(" ")} ${s.equations.map((e) => e.no + " " + e.meaning).join(" ")}`.toLowerCase().includes(q))
   }, [query])
   const filteredCalcs = useMemo(() => {
     const q = query.trim().toLowerCase()
-    return PART5_CALCULATORS.filter((c) => !q || `${c.title} ${c.section} ${c.equations.join(" ")} ${c.summary}`.toLowerCase().includes(q))
+    return ALL_CALCULATORS.filter((c) => !q || `${c.title} ${c.section} ${c.equations.join(" ")} ${c.summary}`.toLowerCase().includes(q))
   }, [query])
 
   const loadText = async (id: string) => {
     setText({ state: "loading" })
     try {
-      const res = await fetch(`/api/part5/text?id=${encodeURIComponent(id)}`, { cache: "no-store" })
+      const res = await fetch(id.includes("-") ? `/api/part5/text?id=${encodeURIComponent(id)}` : `/api/div2/text?id=${encodeURIComponent(id)}`, { cache: "no-store" })
       const data = (await res.json()) as { text?: string; error?: string }
       if (!res.ok || !data.text) setText({ state: "error", error: data.error ?? "Could not load the text." })
       else setText({ state: "ok", body: data.text })
@@ -63,23 +103,23 @@ export function Part5Explorer({
       <DialogContent className="flex h-[94dvh] w-[calc(100vw-0.75rem)] max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl p-0 sm:h-[88dvh] sm:w-full">
         <DialogHeader className="space-y-2 border-b border-stone-200 bg-stone-50/80 px-4 py-3 text-left">
           <div className="flex items-center gap-2 pr-8">
-            {selected && (
-              <button type="button" onClick={() => setSelected(null)} aria-label="Back to all sections" className="rounded-full p-1.5 text-stone-500 hover:bg-stone-200"><ChevronLeft className="size-5" aria-hidden="true" /></button>
+            {(selected || toc) && (
+              <button type="button" onClick={() => (toc ? (setToc(null), setPageNo(null)) : setSelected(null))} aria-label="Back to all sections" className="rounded-full p-1.5 text-stone-500 hover:bg-stone-200"><ChevronLeft className="size-5" aria-hidden="true" /></button>
             )}
             <span className="inline-flex size-7 items-center justify-center rounded-lg bg-emerald-600 text-white"><BookOpen className="size-4" aria-hidden="true" /></span>
-            <DialogTitle className="text-base font-semibold text-stone-900">{selected ? `${selected.id} — ${selected.title}` : "Division 2 · Part 5 Explorer"}</DialogTitle>
+            <DialogTitle className="text-base font-semibold text-stone-900">{toc ? `${toc.id} — ${toc.title}` : selected ? `${selected.id} — ${selected.title}` : "Division 2 Library"}</DialogTitle>
           </div>
           <DialogDescription className="text-xs text-stone-500">
-            {selected ? `2025 edition · printed page ${selected.page}` : "Design by analysis — every paragraph, equation and calculator. Works without AI."}
+            {toc ? `2025 edition · printed page ${toc.page ?? "—"}` : selected ? `2025 edition · printed page ${selected.page}` : "All nine Parts — guide, equations, calculators, exact text and page images from your PDF. Works without AI."}
           </DialogDescription>
-          {!selected && (
+          {!selected && !toc && (
             <>
               <div className="flex items-center gap-2 rounded-xl border border-stone-300 bg-white px-3 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-200">
                 <Search className="size-4 text-stone-400" aria-hidden="true" />
                 <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search paragraphs, equations, topics…" aria-label="Search Part 5" className="w-full bg-transparent py-2.5 text-sm outline-none" />
               </div>
               <div className="flex gap-1.5" role="tablist">
-                {([["guide", "Paragraphs"], ["calculators", `Calculators (${PART5_CALCULATORS.length})`]] as const).map(([k, label]) => (
+                {([["guide", "Detailed guide"], ["all", "All parts 1–9"], ["calculators", `Calculators (${ALL_CALCULATORS.length})`]] as const).map(([k, label]) => (
                   <button key={k} role="tab" aria-selected={tab === k} type="button" onClick={() => setTab(k)}
                     className={cn("rounded-full px-3 py-1.5 text-xs font-medium ring-1 transition", tab === k ? "bg-emerald-600 text-white ring-emerald-600" : "bg-white text-stone-600 ring-stone-200 hover:bg-stone-100")}>{label}</button>
                 ))}
@@ -89,7 +129,7 @@ export function Part5Explorer({
         </DialogHeader>
 
         <div className="flex-1 overflow-y-auto px-4 py-4">
-          {!selected && tab === "guide" && (
+          {!selected && !toc && tab === "guide" && (
             <div className="space-y-5">
               {groups.length === 0 && <p className="py-10 text-center text-sm text-stone-500">Nothing matches “{query}”.</p>}
               {groups.map(([group, list]) => (
@@ -109,7 +149,7 @@ export function Part5Explorer({
             </div>
           )}
 
-          {!selected && tab === "calculators" && (
+          {!selected && !toc && tab === "calculators" && (
             <div className="grid gap-2 sm:grid-cols-2">
               {filteredCalcs.map((c) => (
                 <button key={c.id} type="button" onClick={() => onOpenCalculator(c.id)} className="rounded-xl bg-white p-3 text-left ring-1 ring-stone-200 transition hover:bg-emerald-50/50 hover:ring-emerald-300">
@@ -121,7 +161,54 @@ export function Part5Explorer({
             </div>
           )}
 
-          {selected && (
+          {!selected && !toc && tab === "all" && (
+            <div className="space-y-5">
+              {Object.entries(DIV2_PARTS).map(([n, name]) => {
+                const q = query.trim().toLowerCase()
+                const list = DIV2_TOC.filter((e) => e.id.startsWith(`${n}.`) && (!q || `${e.id} ${e.title}`.toLowerCase().includes(q)))
+                if (list.length === 0) return null
+                return (
+                  <section key={n}>
+                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-stone-500">Part {n} — {name}</h3>
+                    <div className="grid gap-1.5 sm:grid-cols-2">
+                      {list.map((e) => {
+                        const detailed = DETAILED.find((d) => d.id === e.id || d.id.startsWith(`${e.id}.`))
+                        return (
+                          <button key={e.id} type="button" onClick={() => (detailed && e.id !== "4.3" ? setSelected(detailed) : (setToc(e), setPageNo(e.page)))} className="flex items-baseline gap-2 rounded-lg bg-white px-3 py-2 text-left text-sm ring-1 ring-stone-200 transition hover:bg-emerald-50/50 hover:ring-emerald-300">
+                            <span className="shrink-0 font-semibold text-emerald-700">{e.id}</span>
+                            <span className="min-w-0 flex-1 text-stone-800">{e.title}</span>
+                            <span className="shrink-0 text-[11px] text-stone-400">p.{e.page ?? "—"}</span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </section>
+                )
+              })}
+            </div>
+          )}
+
+          {toc && (
+            <article className="space-y-4">
+              <p className="text-sm text-stone-600">Part {toc.id.split(".")[0]} — {DIV2_PARTS[Number(toc.id.split(".")[0])]}. Open the exact text or look at the printed pages (figures, tables and graphs) straight from your own PDF.</p>
+              {DETAILED.filter((d) => d.id.startsWith(toc.id)).length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {DETAILED.filter((d) => d.id.startsWith(toc.id)).map((d) => (
+                    <button key={d.id} type="button" onClick={() => { setToc(null); setSelected(d) }} className="rounded-full bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-700">{d.id} — {d.title}</button>
+                  ))}
+                </div>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => loadText(toc.id)} disabled={text.state === "loading"} className="inline-flex items-center gap-1.5 rounded-full bg-white px-3.5 py-2 text-xs font-medium text-stone-700 ring-1 ring-stone-300 hover:bg-stone-100 disabled:opacity-60">{text.state === "loading" ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <FileText className="size-3.5" aria-hidden="true" />}Full text from my PDF</button>
+                <button type="button" onClick={() => { onElaborate(`Division 2 ${toc.id} ${toc.title}: explain this section in depth with equations and a worked example.`); onClose() }} className="inline-flex items-center gap-1.5 rounded-full bg-white px-3.5 py-2 text-xs font-medium text-stone-700 ring-1 ring-stone-300 hover:bg-stone-100"><Sparkles className="size-3.5 text-emerald-600" aria-hidden="true" />Ask AI about this section</button>
+              </div>
+              {toc.page && <PageViewer start={pageNo ?? toc.page} />}
+              {text.state === "error" && <p role="alert" className="rounded-lg bg-amber-50 p-3 text-xs text-amber-900 ring-1 ring-amber-200">{text.error}</p>}
+              {text.state === "ok" && <pre className="max-h-[50dvh] overflow-auto whitespace-pre-wrap rounded-xl bg-stone-50 p-3 font-sans text-[13px] leading-relaxed text-stone-700 ring-1 ring-stone-200">{text.body}</pre>}
+            </article>
+          )}
+
+          {selected && !toc && (
             <article className="space-y-5">
               <p className="text-sm leading-relaxed text-stone-700">{selected.summary}</p>
               {selected.points.length > 0 && (
@@ -154,8 +241,10 @@ export function Part5Explorer({
                 <button type="button" onClick={() => loadText(selected.id)} disabled={text.state === "loading"} className="inline-flex items-center gap-1.5 rounded-full bg-white px-3.5 py-2 text-xs font-medium text-stone-700 ring-1 ring-stone-300 hover:bg-stone-100 disabled:opacity-60">
                   {text.state === "loading" ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <FileText className="size-3.5" aria-hidden="true" />}Full text from my PDF
                 </button>
-                <button type="button" onClick={() => { onElaborate(`Division 2 Part 5 ${selected.id} ${selected.title}: explain this in depth with a worked example.`); onClose() }} className="inline-flex items-center gap-1.5 rounded-full bg-white px-3.5 py-2 text-xs font-medium text-stone-700 ring-1 ring-stone-300 hover:bg-stone-100"><Sparkles className="size-3.5 text-emerald-600" aria-hidden="true" />Ask AI to elaborate</button>
+                <button type="button" onClick={() => setViewPage(selected.page)} className="inline-flex items-center gap-1.5 rounded-full bg-white px-3.5 py-2 text-xs font-medium text-stone-700 ring-1 ring-stone-300 hover:bg-stone-100"><ImageIcon className="size-3.5" aria-hidden="true" />View PDF pages (figures &amp; tables)</button>
+                <button type="button" onClick={() => { onElaborate(`Division 2 ${selected.id} ${selected.title}: explain this in depth with a worked example.`); onClose() }} className="inline-flex items-center gap-1.5 rounded-full bg-white px-3.5 py-2 text-xs font-medium text-stone-700 ring-1 ring-stone-300 hover:bg-stone-100"><Sparkles className="size-3.5 text-emerald-600" aria-hidden="true" />Ask AI to elaborate</button>
               </div>
+              {viewPage !== null && <PageViewer start={viewPage} onClose={() => setViewPage(null)} />}
               {text.state === "error" && <p role="alert" className="rounded-lg bg-amber-50 p-3 text-xs text-amber-900 ring-1 ring-amber-200">{text.error}</p>}
               {text.state === "ok" && (
                 <div className="space-y-2">
