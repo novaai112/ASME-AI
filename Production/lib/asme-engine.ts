@@ -319,6 +319,12 @@ interface GlossaryEntry {
 
 const GLOSSARY: GlossaryEntry[] = [
   {
+    id: "ug27",
+    match: /UG-?27|thickness of shells? under internal pressure|minimum required thickness.*(?:cylind|shell)/i,
+    title: "Division 1 UG-27 — thickness of shells under internal pressure",
+    body: "The required thickness is found from the design pressure $P$, the **corroded** inside radius $R$, the allowable stress $S$ at the design temperature and the weld joint efficiency $E$, then the corrosion allowance is added back. For a cylinder the thicker result of the circumferential-stress and longitudinal-stress formulas governs: $$t=\\frac{PR}{SE-0.6P}\\qquad t=\\frac{PR}{2SE+0.4P}$$ and for a sphere $$t=\\frac{PR}{2SE-0.2P}$$ The thin-shell formulas apply only within their limits (roughly $t\\le 0.5R$ or $P\\le 0.385SE$ for hoop stress); beyond them the thick-shell rules of Mandatory Appendix 1 are used. Minimum thickness rules (UG-16), external pressure and other loadings can still govern, and the final thickness is rounded up with the mill under-tolerance considered. Give $P$, $S$, $R$ (or diameter), $E$ and the corrosion allowance with units and the engine will calculate it for you.",
+  },
+  {
     id: "mawp",
     match: /\bMAWP\b|maximum allowable working pressure/i,
     title: "MAWP — maximum allowable working pressure",
