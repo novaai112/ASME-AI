@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import { MessageBubble } from "./message-bubble"
 import type { Message } from "./chat-shell"
 import { TypingIndicator } from "./typing-indicator"
-import { BookOpen, Calculator, FileSearch, GitCompareArrows, RefreshCw, WifiOff } from "lucide-react"
+import { BookOpen, Calculator, FileSearch, Flame, GitCompareArrows, RefreshCw, Stamp, WifiOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { AnimatedOrb } from "./animated-orb"
 
@@ -19,16 +19,21 @@ interface MessageListProps {
   onRetry: () => void
   isLoaded: boolean // Added isLoaded prop to know when localStorage is loaded
   userAvatarUrl?: string
+  onOpenCalculator?: (id: string) => void
+  onOpenExplorer?: (sectionId?: string) => void
+  onElaborate?: (message: Message) => void
 }
 
 const SUGGESTIONS = [
   { icon: BookOpen, title: "Part 5 overview", text: "Explain ASME Section VIII Division 2 Part 5 design-by-analysis, section by section" },
   { icon: Calculator, title: "Shell thickness", text: "How is minimum required thickness of a cylindrical shell under internal pressure determined in Division 1 (UG-27)?" },
   { icon: GitCompareArrows, title: "Compare editions", text: "Compare Division 2 ratcheting assessment between the 2017 and 2025 editions" },
+  { icon: Flame, title: "Test pressure", text: "Calculate the Division 1 hydrostatic test pressure for MAWP = 300 psi" },
+  { icon: Stamp, title: "Stamps & scope", text: "What is the difference between a U-stamp and an R-stamp, and where does NBIC apply?" },
   { icon: FileSearch, title: "Analyse a file", text: "I’ll attach a drawing or PDF — check it against the applicable Code requirements" },
 ]
 
-export function MessageList({ messages, isStreaming, status, activity, recovering, error, onRetry, onSuggest, isLoaded, userAvatarUrl }: MessageListProps) {
+export function MessageList({ messages, isStreaming, status, activity, recovering, error, onRetry, onSuggest, isLoaded, userAvatarUrl, onOpenCalculator, onOpenExplorer, onElaborate }: MessageListProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
@@ -190,6 +195,9 @@ export function MessageList({ messages, isStreaming, status, activity, recoverin
             message={message}
             isStreaming={isStreaming && message.role === "assistant" && message === lastMessage}
             userAvatarUrl={userAvatarUrl}
+            onOpenCalculator={onOpenCalculator}
+            onOpenExplorer={onOpenExplorer}
+            onElaborate={onElaborate}
           />
         ))}
 

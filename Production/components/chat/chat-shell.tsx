@@ -1,7 +1,10 @@
 "use client"
 
 import { useState, useEffect, useCallback, useRef } from "react"
-import { MessageSquareDashed, PanelLeftClose, PanelLeftOpen } from "lucide-react"
+import { Activity, BookOpen, Calculator, MessageSquareDashed, PanelLeftClose, PanelLeftOpen } from "lucide-react"
+import { CalculatorDialog } from "@/components/part5/calculator-dialog"
+import { Part5Explorer } from "@/components/part5/part5-explorer"
+import { StatusPanel } from "./status-panel"
 import { MessageList } from "./message-list"
 import { AI_MODELS, Composer, type AIModel } from "./composer"
 import { Button } from "@/components/ui/button"
@@ -21,6 +24,8 @@ export interface Message {
   /** Which AI wrote this answer (e.g. "Claude"); "switched" = failover happened mid-answer. */
   model?: string
   switched?: boolean
+  /** Set when the Part 5 Brain answered: which paragraphs and calculators to offer. */
+  part5?: { sections: string[]; calculators: string[] }
 }
 
 const LEGACY_STORAGE_KEY = "chat-messages"
@@ -49,6 +54,7 @@ type StreamItem =
   | { type: "text"; text?: string }
   | { type: "meta"; label?: string; switched?: boolean }
   | { type: "done"; complete?: boolean; degraded?: boolean }
+  | { type: "part5"; sections?: string[]; calculators?: string[] }
   | { type: "error"; error?: string; retryable?: boolean }
 
 const wait = (ms: number, signal: AbortSignal) =>
@@ -63,6 +69,12 @@ function friendlyFailure(): string {
 
 export function ChatShell() {
   const [messages, setMessages] = useState<Message[]>([])
+  const [calculatorId, setCalculatorId] = useState<string | null>(null)
+  const [explorerOpen, setExplorerOpen] = useState(false)
+  const [explorerSection, setExplorerSection] = useState<string | null>(null)
+  const [explorerTab, setExplorerTab] = useState<"guide" | "calculators">("guide")
+  const [statusOpen, setStatusOpen] = useState(false)
+  const nextModeRef = useRef<"ai" | undefined>(undefined)
   const [conversations, setConversations] = useState<ChatConversation[]>([])
   const [activeConversationId, setActiveConversationId] = useState("")
   const [storageKey, setStorageKey] = useState("")
@@ -235,6 +247,9 @@ export function ChatShell() {
       let recoveries = 0
       let modelLabel: string | undefined
       let switched = false
+      let part5: { sections: string[]; calculators: string[] } | undefined
+      const requestMode = nextModeRef.current
+      nextModeRef.current = undefined
 
       const pushStatus = (status: string) => {
         setAssistantStatus(status)
@@ -243,7 +258,7 @@ export function ChatShell() {
       const flush = () =>
         setMessages((prev) =>
           prev.map((msg) =>
-            msg.id === assistantMessage.id ? { ...msg, content: accumulated, model: modelLabel, switched } : msg,
+            msg.id === assistantMessage.id ? { ...msg, content: accumulated, model: modelLabel, switched, part5 } : msg,
           ),
         )
 
@@ -252,7 +267,7 @@ export function ChatShell() {
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: history, model: selectedModel, ...(resume ? { resume } : {}) }),
+          body: JSON.stringify({ messages: history, model: selectedModel, ...(resume ? { resume } : {}), ...(requestMode ? { mode: requestMode } : {}) }),
           signal: controller.signal,
         })
         if (!response.ok) {
@@ -276,6 +291,7 @@ export function ChatShell() {
           if (item.type === "status" && item.status) pushStatus(item.status)
           else if (item.type === "text" && item.text) { accumulated += item.text; setRecovering(false) }
           else if (item.type === "meta") { modelLabel = item.label ?? modelLabel; switched = switched || Boolean(item.switched) }
+          else if (item.type === "part5") { part5 = { sections: item.sections ?? [], calculators: item.calculators ?? [] } }
           else if (item.type === "done") { finished = Boolean(item.complete); degraded = Boolean(item.degraded) }
           else if (item.type === "error") softError = { retryable: item.retryable !== false, message: item.error }
         }
@@ -424,6 +440,24 @@ export function ChatShell() {
     }
   }, [activeConversationId, conversations])
 
+  // "Ask AI to elaborate": same question, but skip the Part 5 Brain and let an AI writer expand on it.
+  const elaborateWithAi = useCallback(
+    (text: string) => {
+      nextModeRef.current = "ai"
+      void sendMessage(text)
+    },
+    [sendMessage],
+  )
+  const elaborateMessage = useCallback(
+    (message: Message) => {
+      const index = messages.findIndex((m) => m.id === message.id)
+      const question = [...messages.slice(0, index)].reverse().find((m) => m.role === "user")?.content ?? "Division 2 Part 5"
+      elaborateWithAi(`${question}\n\nPlease explain this in more depth with a worked example, using the Division 2 Part 5 paragraphs.`)
+    },
+    [messages, elaborateWithAi],
+  )
+  const openExplorer = useCallback((sectionId?: string) => { setExplorerTab("guide"); setExplorerSection(sectionId ?? null); setExplorerOpen(true) }, [])
+
   return (
     <div className="relative min-h-dvh bg-stone-50">
       <ChatHistorySidebar
@@ -476,6 +510,18 @@ export function ChatShell() {
               <MessageSquareDashed className="size-5" aria-hidden="true" />
             </Button>
           )}
+          <div className="absolute right-3 top-3 flex items-center gap-2">
+            {([
+              { label: "Part 5 Explorer", icon: BookOpen, onClick: () => { setExplorerTab("guide"); openExplorer() } },
+              { label: "Calculators", icon: Calculator, onClick: () => { setExplorerTab("calculators"); setExplorerSection(null); setExplorerOpen(true) } },
+              { label: "System status", icon: Activity, onClick: () => setStatusOpen(true) },
+            ] as const).map(({ label, icon: Icon, onClick }) => (
+              <Button key={label} onClick={onClick} variant="ghost" size="icon" aria-label={label} title={label}
+                className="h-10 w-10 rounded-full bg-slate-100/65 text-slate-600 shadow-sm ring-1 ring-white/50 backdrop-blur-md hover:bg-slate-200/75">
+                <Icon className="size-5" aria-hidden="true" />
+              </Button>
+            ))}
+          </div>
         </header>
         <MessageList
           messages={messages}
@@ -488,6 +534,9 @@ export function ChatShell() {
           onRetry={retry}
           isLoaded={isLoaded}
           userAvatarUrl={userAvatarUrl}
+          onOpenCalculator={setCalculatorId}
+          onOpenExplorer={openExplorer}
+          onElaborate={elaborateMessage}
         />
         <Composer
           onSend={sendMessage}
@@ -500,6 +549,9 @@ export function ChatShell() {
           onTyping={() => setHistoryOpen(false)}
         />
       </main>
+      <Part5Explorer open={explorerOpen} onClose={() => setExplorerOpen(false)} initialSectionId={explorerSection} initialTab={explorerTab} onOpenCalculator={setCalculatorId} onElaborate={elaborateWithAi} />
+      <CalculatorDialog calculatorId={calculatorId} onClose={() => setCalculatorId(null)} />
+      <StatusPanel open={statusOpen} onClose={() => setStatusOpen(false)} />
     </div>
   )
 }
@@ -534,6 +586,7 @@ function parseMessages(value: unknown): Message[] {
       attachmentName: typeof message.attachmentName === "string" ? message.attachmentName : undefined,
       model: typeof message.model === "string" ? message.model : undefined,
       switched: message.switched === true,
+      part5: message.part5 && Array.isArray(message.part5.calculators) ? { sections: Array.isArray(message.part5.sections) ? message.part5.sections.filter((x): x is string => typeof x === "string") : [], calculators: message.part5.calculators.filter((x): x is string => typeof x === "string") } : undefined,
     }]
   })
 }
