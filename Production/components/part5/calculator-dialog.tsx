@@ -69,13 +69,13 @@ export function CalculatorDialog({ calculatorId, onClose }: { calculatorId: stri
       <DialogContent className="flex max-h-[92dvh] w-[calc(100vw-1rem)] max-w-2xl flex-col gap-0 overflow-hidden rounded-2xl p-0 sm:w-full">
         {def && (
           <>
-            <DialogHeader className="space-y-1 border-b border-stone-200 bg-stone-50/80 px-5 py-4 text-left">
+            <DialogHeader className="space-y-1 border-b border-stone-200 bg-stone-50/80 px-4 py-3 text-left sm:px-5 sm:py-4">
               <div className="flex flex-wrap items-center gap-2 pr-8">
                 <span className="inline-flex size-7 items-center justify-center rounded-lg bg-emerald-600 text-white"><CalcIcon className="size-4" aria-hidden="true" /></span>
-                <DialogTitle className="text-base font-semibold text-stone-900">{def.title}</DialogTitle>
+                <DialogTitle className="text-[15px] font-semibold leading-snug text-stone-900 sm:text-base">{def.title}</DialogTitle>
               </div>
-              <DialogDescription className="text-xs text-stone-500">
-                Part 5 · {def.section}{def.equations.length ? ` · eq. ${def.equations.join(", ")}` : ""} — {def.summary}
+              <DialogDescription className="line-clamp-2 text-xs text-stone-500">
+                Part {def.section.split(".")[0]} · {def.section}{def.equations.length ? ` · eq. ${def.equations.length > 4 ? `${def.equations[0]} – ${def.equations[def.equations.length - 1]}` : def.equations.join(", ")}` : ""} — {def.summary}
               </DialogDescription>
               <div className="flex items-center gap-2 pt-1" role="group" aria-label="Unit system">
                 <span className="text-[11px] font-medium text-stone-500">Units</span>

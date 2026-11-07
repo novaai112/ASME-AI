@@ -6,6 +6,8 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { cn } from "@/lib/utils"
 import { ALL_CALCULATORS, getCalculator } from "@/lib/calc-registry"
 import { DIV2_DETAIL_SECTIONS } from "@/lib/div2/outline"
+import { PdfPageViewer, useLocalPdf } from "./pdf-page-viewer"
+import { extractPdfText, PAGE_OFFSET } from "@/lib/local-pdf"
 import { DIV2_PARTS, DIV2_TOC, type Div2TocEntry } from "@/lib/div2/toc"
 import { GROUP_LABELS, PART5_SECTIONS, type Part5Section } from "@/lib/part5/outline"
 import { Math } from "./math"
@@ -13,39 +15,6 @@ import { Math } from "./math"
 type Tab = "guide" | "calculators" | "all"
 const DETAILED = [...DIV2_DETAIL_SECTIONS, ...PART5_SECTIONS]
 
-
-/** Page image rendered from the owner's own PDF (figures, tables, graphs, equations). */
-function PageViewer({ start, onClose }: { start: number; onClose?: () => void }) {
-  const [page, setPage] = useState(start)
-  const [state, setState] = useState<"loading" | "ok" | "error">("loading")
-  const src = `/api/div2/page?printed=${page}`
-  useEffect(() => setPage(start), [start])
-  useEffect(() => setState("loading"), [page])
-  return (
-    <div className="space-y-2 rounded-xl bg-stone-100 p-2 ring-1 ring-stone-200">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5">
-          <button type="button" aria-label="Previous page" onClick={() => setPage((p) => globalThis.Math.max(1, p - 1))} className="rounded-lg bg-white p-1.5 ring-1 ring-stone-300 hover:bg-stone-50"><ChevronLeft className="size-4" aria-hidden="true" /></button>
-          <label className="flex items-center gap-1 text-xs text-stone-600">Page
-            <input inputMode="numeric" value={page} onChange={(e) => { const n = Number(e.target.value.replace(/\D/g, "")); if (n >= 1 && n <= 950) setPage(n) }} aria-label="Printed page number" className="w-14 rounded-lg border border-stone-300 bg-white px-2 py-1 text-center text-sm" />
-          </label>
-          <button type="button" aria-label="Next page" onClick={() => setPage((p) => globalThis.Math.min(950, p + 1))} className="rounded-lg bg-white p-1.5 ring-1 ring-stone-300 hover:bg-stone-50"><ChevronRight className="size-4" aria-hidden="true" /></button>
-        </div>
-        <div className="flex items-center gap-2">
-          <a href={src} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline"><ExternalLink className="size-3.5" aria-hidden="true" />Open full size</a>
-          {onClose && <button type="button" onClick={onClose} className="text-xs text-stone-500 hover:text-stone-800">Close</button>}
-        </div>
-      </div>
-      <div className="relative min-h-40 overflow-auto rounded-lg bg-white">
-        {state === "loading" && <div className="absolute inset-0 flex items-center justify-center text-sm text-stone-400"><Loader2 className="mr-2 size-4 animate-spin" aria-hidden="true" />Rendering page from your PDF…</div>}
-        {state === "error" && <p role="alert" className="p-4 text-sm text-amber-800">The page image is unavailable — the laptop service must be online with the Division 2 PDF (see README).</p>}
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img key={page} src={src} alt={`Division 2 printed page ${page}`} onLoad={() => setState("ok")} onError={() => setState("error")} className={cn("h-auto w-full", state !== "ok" && "opacity-0")} />
-      </div>
-      <p className="text-[11px] text-stone-400">Rendered live from your own licensed PDF on the laptop — not stored on the website.</p>
-    </div>
-  )
-}
 
 export function Part5Explorer({
   open, onClose, initialSectionId, initialTab = "guide", onOpenCalculator, onElaborate,
@@ -80,12 +49,27 @@ export function Part5Explorer({
     return ALL_CALCULATORS.filter((c) => !q || `${c.title} ${c.section} ${c.equations.join(" ")} ${c.summary}`.toLowerCase().includes(q))
   }, [query])
 
+  const { info: localPdf } = useLocalPdf()
   const loadText = async (id: string) => {
     setText({ state: "loading" })
+    // 1) the PDF stored on this device (works offline), 2) the laptop service
+    if (localPdf) {
+      try {
+        const entryIdx = DIV2_TOC.findIndex((e) => e.id === id)
+        const entry = entryIdx >= 0 ? DIV2_TOC[entryIdx] : null
+        const from = entry ? entry.pdfPage : (selected ? selected.page + PAGE_OFFSET : null)
+        if (from) {
+          const to = entry ? (DIV2_TOC[entryIdx + 1]?.pdfPage ?? from + 3) : from + 3
+          const body = await extractPdfText(from, to)
+          setText({ state: "ok", body: `Pages ${from - PAGE_OFFSET}–${globalThis.Math.min(to, from + 13) - PAGE_OFFSET} of your PDF (the section starts on the first page; the last page may begin the next section):\n\n${body}` })
+          return
+        }
+      } catch { /* fall through to the laptop */ }
+    }
     try {
       const res = await fetch(id.includes("-") ? `/api/part5/text?id=${encodeURIComponent(id)}` : `/api/div2/text?id=${encodeURIComponent(id)}`, { cache: "no-store" })
       const data = (await res.json()) as { text?: string; error?: string }
-      if (!res.ok || !data.text) setText({ state: "error", error: data.error ?? "Could not load the text." })
+      if (!res.ok || !data.text) setText({ state: "error", error: `${data.error ?? "Could not load the text."} You can also choose your PDF under “View PDF pages” to read it on this device.` })
       else setText({ state: "ok", body: data.text })
     } catch {
       setText({ state: "error", error: "Could not reach the server." })
@@ -202,7 +186,7 @@ export function Part5Explorer({
                 <button type="button" onClick={() => loadText(toc.id)} disabled={text.state === "loading"} className="inline-flex items-center gap-1.5 rounded-full bg-white px-3.5 py-2 text-xs font-medium text-stone-700 ring-1 ring-stone-300 hover:bg-stone-100 disabled:opacity-60">{text.state === "loading" ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <FileText className="size-3.5" aria-hidden="true" />}Full text from my PDF</button>
                 <button type="button" onClick={() => { onElaborate(`Division 2 ${toc.id} ${toc.title}: explain this section in depth with equations and a worked example.`); onClose() }} className="inline-flex items-center gap-1.5 rounded-full bg-white px-3.5 py-2 text-xs font-medium text-stone-700 ring-1 ring-stone-300 hover:bg-stone-100"><Sparkles className="size-3.5 text-emerald-600" aria-hidden="true" />Ask AI about this section</button>
               </div>
-              {toc.page && <PageViewer start={pageNo ?? toc.page} />}
+              {toc.page && <PdfPageViewer start={pageNo ?? toc.page} />}
               {text.state === "error" && <p role="alert" className="rounded-lg bg-amber-50 p-3 text-xs text-amber-900 ring-1 ring-amber-200">{text.error}</p>}
               {text.state === "ok" && <pre className="max-h-[50dvh] overflow-auto whitespace-pre-wrap rounded-xl bg-stone-50 p-3 font-sans text-[13px] leading-relaxed text-stone-700 ring-1 ring-stone-200">{text.body}</pre>}
             </article>
@@ -222,7 +206,7 @@ export function Part5Explorer({
                   {selected.equations.map((e) => (
                     <div key={e.no} className="rounded-xl bg-stone-50 p-3 ring-1 ring-stone-200">
                       <p className="text-xs font-semibold text-stone-600">Eq. ({e.no}) <span className="font-normal text-stone-500">— {e.meaning}</span></p>
-                      <div className="overflow-x-auto"><Math tex={e.latex} display /></div>
+                      <div className="overflow-x-auto text-[13px] sm:text-base"><Math tex={e.latex} display /></div>
                     </div>
                   ))}
                 </div>
@@ -244,7 +228,7 @@ export function Part5Explorer({
                 <button type="button" onClick={() => setViewPage(selected.page)} className="inline-flex items-center gap-1.5 rounded-full bg-white px-3.5 py-2 text-xs font-medium text-stone-700 ring-1 ring-stone-300 hover:bg-stone-100"><ImageIcon className="size-3.5" aria-hidden="true" />View PDF pages (figures &amp; tables)</button>
                 <button type="button" onClick={() => { onElaborate(`Division 2 ${selected.id} ${selected.title}: explain this in depth with a worked example.`); onClose() }} className="inline-flex items-center gap-1.5 rounded-full bg-white px-3.5 py-2 text-xs font-medium text-stone-700 ring-1 ring-stone-300 hover:bg-stone-100"><Sparkles className="size-3.5 text-emerald-600" aria-hidden="true" />Ask AI to elaborate</button>
               </div>
-              {viewPage !== null && <PageViewer start={viewPage} onClose={() => setViewPage(null)} />}
+              {viewPage !== null && <PdfPageViewer start={viewPage} onClose={() => setViewPage(null)} />}
               {text.state === "error" && <p role="alert" className="rounded-lg bg-amber-50 p-3 text-xs text-amber-900 ring-1 ring-amber-200">{text.error}</p>}
               {text.state === "ok" && (
                 <div className="space-y-2">
