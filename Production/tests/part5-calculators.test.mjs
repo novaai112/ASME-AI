@@ -158,9 +158,118 @@ test("Division 2 test pressure eq 8.1 (Table 4.1.3 factors)", () => {
 })
 
 test("registry and Div 2 question routing", () => {
-  assert.ok(ALL_CALCULATORS.length >= 22); assert.ok(getAny("div2-torispherical") && getAny("von-mises"))
+  assert.ok(ALL_CALCULATORS.length >= 34); assert.ok(getAny("div2-torispherical") && getAny("von-mises"))
   assert.equal(isDiv2RuleQuestion("Division 2 torispherical head thickness"), true)
   assert.equal(isDiv2RuleQuestion("Division 1 UG-27 cylinder thickness"), false)
   assert.equal(isDiv2RuleQuestion("hydrotest pressure"), false)
   assert.equal(isDiv2RuleQuestion("what is the hydrostatic test pressure in Division 2"), true)
+})
+
+test("flat heads 4.6: circular unbolted, Detail 3 C, bolted max(to,tg), non-circular Z", () => {
+  // t = d*sqrt(C P/(S E)) with C=0.33, d=500, P=1, S=138, E=1 -> 500*sqrt(0.33/138)=24.45
+  near(Number(res(runAny("div2-flat-circular", { bolted: "no", d: 500, P: 1, Sho: 138, E: 1, cdetail: "d5" }, "SI")).results[0].value), 500 * Math.sqrt(0.33 / 138), 1e-4)
+  // Detail 3, m = 0.5 -> C = max(0.165, 0.2) = 0.2
+  near(Number(res(runAny("div2-flat-circular", { bolted: "no", d: 500, P: 1, Sho: 138, E: 1, cdetail: "d3", m: 0.5 }, "SI")).results[0].value), 500 * Math.sqrt(0.2 / 138), 1e-4)
+  const b = res(runAny("div2-flat-circular", { bolted: "yes", d: 500, P: 1, Sho: 138, E: 1, cdetail: "manual", Cman: 0.3, Wo: 400000, Wg: 300000, hG: 40, Shg: 138 }, "SI"))
+  const to = 500 * Math.sqrt((0.3 * 1) / 138 + (1.9 * 400000 * 40) / (138 * 500 ** 3)), tg = 500 * Math.sqrt((1.9 * 300000 * 40) / (138 * 500 ** 3))
+  near(Number(b.results[0].value), Math.max(to, tg), 1e-4)
+  // non-circular: d=300, D=600 -> Z = min(2.5, 3.4-1.2)=2.2
+  const n = res(runAny("div2-flat-noncircular", { bolted: "no", d: 300, D: 600, P: 1, Sho: 138, E: 1, cdetail: "d5" }, "SI"))
+  near(Number(n.results[0].value), 2.2, 1e-4); near(Number(n.results[1].value), 300 * Math.sqrt((2.2 * 0.33) / 138), 1e-4)
+  assert.equal(runAny("div2-flat-circular", { bolted: "no", d: 500, P: 1, Sho: 138, E: 1, cdetail: "d3" }, "SI").ok, false) // needs m
+})
+
+import { cylinderCh, designFactorFS, ellipsoidKo } from "../lib/div2/calculators.ts"
+test("external pressure 4.4: FS, C_h ranges, cylinder and head allowable pressure", () => {
+  assert.equal(designFactorFS(100, 250).FS, 2.0); near(designFactorFS(200, 250).FS, 2.407 - 0.741 * 0.8, 1e-9); assert.equal(designFactorFS(250, 250).FS, 1.667)
+  near(designFactorFS(0.55 * 250, 250).FS, 2.0, 1e-9); near(designFactorFS(249.99, 250).FS, 1.667, 1e-3) // continuity at both ends
+  assert.equal(cylinderCh(1.0, 1000, 10).Ch, 1.0); near(cylinderCh(5, 1000, 10).Ch, 0.92 / (5 - 0.579), 1e-9)
+  near(cylinderCh(42.43, 1000, 10).Ch, 1.12 * 42.43 ** -1.058, 1e-9); near(cylinderCh(400, 1000, 10).Ch, 0.55 * 0.01, 1e-9)
+  // independent calculation: Do=1000, t=10, L=3000, Ey=200000, elastic buckling
+  const Mx = 3000 / Math.sqrt(500 * 10), Ch = 1.12 * Mx ** -1.058, Fhe = 1.6 * Ch * 200000 * 10 / 1000
+  const o = res(runAny("div2-ext-cylinder", { Do: 1000, t: 10, L: 3000, Ey: 200000, Sy: 250, ficMode: "elastic", P: 0.1 }, "SI"))
+  near(Number(o.results.find((r) => r.label.startsWith("F_he")).value), Fhe, 1e-3)
+  near(Number(o.results.find((r) => r.label.startsWith("Allowable external")).value), 2 * (Fhe / 2) * (10 / 1000), 1e-3) // FS = 2 since F_he < .55 Sy
+  // first pass without F_ic only reports F_he / A_e and guidance
+  const first = res(runAny("div2-ext-cylinder", { Do: 1000, t: 10, L: 3000, Ey: 200000, Sy: 250, ficMode: "manual" }, "SI"))
+  assert.ok(first.warnings.some((w) => /tangent modulus/.test(w))); assert.equal(first.verdict, undefined)
+  // sphere and ellipsoidal head
+  near(Number(res(runAny("div2-ext-sphere-head", { shape: "sph", Ro: 1000, t: 10, Ey: 200000, Sy: 250, ficMode: "elastic" }, "SI")).results.find((r) => r.label.startsWith("F_he")).value), 0.075 * 200000 * 10 / 1000, 1e-6)
+  near(ellipsoidKo(2000, 500), 0.25346 + 0.13995 * 2 + 0.12238 * 4 - 0.015297 * 8, 1e-9) // k=2 -> ~0.9
+  assert.equal(runAny("div2-ext-cylinder", { Do: 1000, t: 600, L: 3000, Ey: 200000, Sy: 250 }, "SI").ok, false)
+})
+
+test("flange bolt loads 4.16: widths, W_o, W_gs, A_m, W_g, forces, gasket table", () => {
+  const G0 = 500, b0 = 10, Cul = 25.4
+  const b = 0.5 * Cul * Math.sqrt(b0 / Cul), G = G0 - 2 * b
+  const P = 2, m = 3.0, y = 69
+  const Wo = 0.785 * G * G * P + 2 * b * Math.PI * G * m * P, Wgs = Math.PI * b * G * y
+  const Am = Math.max(Wo / 138, Wgs / 138)
+  const o = res(runAny("div2-flange-bolt-loads", { gasket: "spiral-ss", selfE: "no", b0, Gc: G0, B: 450, P, Sbo: 138, Sbg: 138, Ab: Am * 1.1 }, "SI"))
+  const val = (label) => Number(o.results.find((r) => r.label.startsWith(label)).value)
+  near(val("b ("), b, 1e-3); near(val("G ("), G, 1e-3); near(val("W_o"), Wo, 1e-3); near(val("W_gs"), Wgs, 1e-3); near(val("A_m"), Am, 1e-3)
+  near(val("W_g ("), ((Am + Am * 1.1) / 2) * 138, 1e-3); near(val("H_G"), Wo - 0.785 * G * G * P, 1e-3)
+  assert.equal(o.verdict.ok, true)
+  assert.equal(res(runAny("div2-flange-bolt-loads", { gasket: "spiral-ss", selfE: "no", b0, Gc: G0, P, Sbo: 138, Sbg: 138, Ab: Am * 0.8 }, "SI")).verdict.ok, false)
+  // small b0 needs the mean diameter G; self-energized gasket has W_gs = 0 and no gasket term
+  assert.equal(runAny("div2-flange-bolt-loads", { gasket: "spiral-ss", b0: 5, Gc: 500, P, Sbo: 138, Sbg: 138 }, "SI").ok, false)
+  const se = res(runAny("div2-flange-bolt-loads", { gasket: "self", selfE: "yes", b0: 5, Gc: 500, Gmean: 495, P: 2, Sbo: 138, Sbg: 138 }, "SI"))
+  near(Number(se.results.find((r) => r.label.startsWith("W_o")).value), 0.785 * 495 * 495 * 2, 1e-3)
+})
+
+test("inspection openings 4.5.16 by diameter", () => {
+  const rule = (id, s = "SI", svc = "corrosive") => res(runAny("div2-inspection-openings", { ID: id, service: svc }, s)).results.find((r) => r.label === "Governing rule").value
+  assert.match(rule(250), /4\.5\.16\.4/); assert.match(rule(350), /4\.5\.16\.5/); assert.match(rule(420), /4\.5\.16\.6\(a\)/)
+  assert.match(rule(600), /4\.5\.16\.6\(b\)/); assert.match(rule(1200), /4\.5\.16\.6\(c\)/); assert.match(rule(48, "US"), /4\.5\.16\.6\(c\)/); assert.match(rule(1200, "SI", "other"), /4\.5\.16\.1/)
+})
+
+test("Brain routes nozzle, flange and external-pressure questions", async () => {
+  const { composePart5Answer, isDiv2RuleQuestion } = await import("../lib/part5/brain.ts")
+  assert.equal(isDiv2RuleQuestion("Division 2 nozzle reinforcement limits"), true)
+  assert.equal(isDiv2RuleQuestion("Division 2 flange bolt load W_o"), true)
+  assert.ok(composePart5Answer("Division 2 flange gasket bolt loads").calculatorIds.includes("div2-flange-bolt-loads"))
+  assert.ok(composePart5Answer("Division 2 manhole inspection opening requirements").sectionIds.includes("4.5"))
+})
+
+test("table lookups: Table 7.2, PWHT (Tables 6.8-6.10), Table 6.6", () => {
+  const n = res(runAny("div2-nde-efficiency", { group: "3a", joint: "A-long" }, "SI"))
+  assert.equal(n.results[0].value, "0.85"); assert.equal(n.results[1].value, "25%"); assert.equal(n.results[2].value, "0%")
+  const n2 = res(runAny("div2-nde-efficiency", { group: "1a", joint: "B-circ-back" }, "SI"))
+  assert.equal(n2.verdict.ok, false) // NP in group 1a
+  assert.equal(res(runAny("div2-nde-efficiency", { group: "2b", joint: "A-tubesheet" }, "SI")).results[1].value, "100%")
+  const h = (mat, t, sys = "SI", extra = {}) => res(runAny("div2-pwht", { mat, tn: t, group3: "12", fired: "no", preheat: "no", ...extra }, sys))
+  const hours = (o) => Number(o.results.find((r) => r.label === "Minimum holding time").value)
+  near(hours(h("p1", 60)), 2.1); near(hours(h("p1", 30)), 1.2); near(hours(h("p1", 5)), 0.25); near(hours(h("p4", 50)), 2); near(hours(h("p4", 150)), 5.25); near(hours(h("p1", 3, "US")), 2.25); near(hours(h("p4", 6, "US")), 5.25)
+  assert.match(h("p1", 40).results[0].value, /yes/); assert.match(h("p1", 35).results[0].value, /yes/); assert.match(h("p1", 35, "SI", { preheat: "yes" }).results[0].value, /no/)
+  assert.match(h("p1", 20).results[0].value, /no/); assert.match(h("p1", 20, "SI", { fired: "yes" }).results[0].value, /yes/); assert.match(h("p3", 10).results[0].value, /conditional/)
+  assert.match(h("p3", 5, "SI", { group3: "3" }).results[0].value, /yes/)
+  const r = (t, sys = "SI") => res(runAny("div2-weld-reinforcement", { t, type: "bc" }, sys)).results.map((x) => Number(x.value))
+  assert.deepEqual(r(20), [4, 2.5]); assert.deepEqual(r(2.4), [2.5, 0.8]); assert.deepEqual(r(125), [8, 8]); assert.deepEqual(r(10), [3, 2.5]); near(r(1.5, "US")[0], 0.15625, 1e-3); near(r(1.5, "US")[1], 0.125, 1e-3)
+  assert.equal(res(runAny("div2-weld-reinforcement", { t: 20, type: "bc", actual: 5 }, "SI")).verdict.ok, false)
+})
+test("Brain routes weld efficiency, PWHT and reinforcement questions", async () => {
+  const { composePart5Answer, isDiv2RuleQuestion } = await import("../lib/part5/brain.ts")
+  assert.equal(isDiv2RuleQuestion("Division 2 PWHT holding time for P-No. 1"), true)
+  assert.equal(isDiv2RuleQuestion("Division 2 weld joint efficiency for spot RT"), true)
+  assert.ok(composePart5Answer("Division 2 PWHT requirements").calculatorIds.includes("div2-pwht"))
+  assert.ok(composePart5Answer("Division 2 weld joint efficiency NDE extent").calculatorIds.includes("div2-nde-efficiency"))
+})
+
+test("ligament efficiency 4.10.1 / 4.10.2", () => {
+  near(Number(res(runAny("div2-ligament", { pitch: "equal", d: 20, p: 50 }, "SI")).results[0].value), 0.6, 1e-3)
+  near(Number(res(runAny("div2-ligament", { pitch: "unequal", d: 20, p1: 120, n: 2, Edes: 0.7 }, "SI")).results[0].value), (120 - 40) / 120, 1e-3)
+  assert.equal(res(runAny("div2-ligament", { pitch: "equal", d: 20, p: 50, Edes: 0.7 }, "SI")).verdict.ok, false)
+  assert.equal(runAny("div2-ligament", { pitch: "equal", d: 60, p: 50 }, "SI").ok, false)
+})
+
+test("4.1.6 test-condition stress limits and S_PS", () => {
+  const o = res(runAny("div2-test-stress-limits", { medium: "hydro", Sy: 250, Pm: 200, Pb: 150 }, "SI"))
+  // Pm=200 > Sy/1.5=166.7 -> eq 4.1.5 limit = (1.5*0.95+1)*250 - 1.5*200 = 606.25-300 = 306.25 ; Pm+Pb=350 > limit
+  assert.equal(o.results[2].status, "fail"); assert.match(o.results[2].label, /4\.1\.5/); near(Number(o.results[2].value.split("≤ ")[1].split(" ")[0]), 306.25, 1e-3)
+  const p = res(runAny("div2-test-stress-limits", { medium: "pneu", Sy: 250, Pm: 150, Pb: 100 }, "SI")) // Pm<=166.7 -> 1.5*0.8*250=300, sum 250 ok
+  assert.match(p.results[2].label, /4\.1\.4/); assert.equal(p.verdict.ok, true)
+  assert.equal(res(runAny("div2-test-stress-limits", { medium: "hydro", Sy: 250, Pm: 240 }, "SI")).verdict.ok, false) // 240 > 237.5
+  near(Number(res(runAny("div2-sps", { S: 138, Sy: 250, SyRT: 250, SuRT: 450, td: "no" }, "SI")).results[0].value), 500, 1e-3) // max(414,500)
+  near(Number(res(runAny("div2-sps", { S: 138, Sy: 250, SyRT: 380, SuRT: 450, td: "no" }, "SI")).results[0].value), 414, 1e-3) // ratio .84 > .7
+  near(Number(res(runAny("div2-sps", { S: 138, Sy: 250, SyRT: 250, SuRT: 450, td: "yes" }, "SI")).results[0].value), 414, 1e-3)
 })
