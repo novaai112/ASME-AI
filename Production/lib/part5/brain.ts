@@ -21,7 +21,7 @@ export function isDiv2RuleQuestion(question: string): boolean {
   const q = question.slice(0, 1500)
   if (!/\bdiv(?:ision)?\.?\s*(?:2|two)\b|VIII[- ]?2|BPVC\.VIII\.2/i.test(q)) return false
   if (/\bdiv(?:ision)?\.?\s*(?:1|3)\b/i.test(q) && !/\bdiv(?:ision)?\.?\s*(?:2|two)\b/i.test(q)) return false
-  return /cylind|cone|conical|sphere|spherical|hemispher|torispherical|ellips|knuckle|head thickness|shell thickness|required thickness|hydro(?:static)?[\s-]*test|pneumatic[\s-]*test|test pressure|\b4\.3\.[1-7]\b|\b8\.[1-4]\b/i.test(q)
+  return /cylind|cone|conical|sphere|spherical|hemispher|torispherical|ellips|knuckle|flat (?:unstayed )?(?:head|cover)|blind flange|head thickness|shell thickness|required thickness|hydro(?:static)?[\s-]*test|pneumatic[\s-]*test|test pressure|external pressure|vacuum|ligament|weld joint efficiency|joint efficiency|PWHT|post-?weld heat|weld reinforcement|NDE extent|examination group|nozzle|manhole|handhole|inspection opening|flange|gasket|bolt load|\b4\.3\.[1-7]\b|\b4\.4(?:\.\d+)*\b|\b4\.5(?:\.\d+)*\b|\b4\.16(?:\.\d+)*\b|\b4\.1\.[3-6](?:\.\d+)*\b|\b4\.10(?:\.\d+)*\b|\b6\.4(?:\.\d+)*\b|\b7\.[45](?:\.\d+)*\b|\b4\.6(?:\.\d)*\b|\b8\.[1-4]\b/i.test(q)
 }
 
 /** True when the question is about Division 2 Part 5 (design by analysis). */
