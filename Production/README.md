@@ -43,7 +43,7 @@ Exact paragraph text ("Full text from my PDF") is read from your own PDF through
 
 ## Whole Division 2 library (all nine Parts)
 
-The header **Division 2 Library** lists every section of Parts 1–9 (generated from your 2025 PDF), a detailed offline guide for Part 5, Part 4.3 (shells and heads) and Part 8.2 (test pressure), and **22 calculators**. For *any* section, **Full text from my PDF** and **View PDF pages** (figures, tables, graphs, equations rendered as images) are read live from your own PDF through the laptop service, so no ASME text or figure is stored in this repository. Laptop setup: put `div2.mjs`, `build-div2.mjs`, the new `server.mjs` and `package.json` next to `ASME Sec VIII Div2 2025.pdf`, run `npm run div2` once (about 1–2 minutes), then restart the service.
+The header **Division 2 Library** lists every section of Parts 1–9 (generated from your 2025 PDF), a detailed offline guide for Part 5, Part 4.3 (shells and heads) and Part 8.2 (test pressure), and **34 calculators**. **No laptop needed for figures:** in **View PDF pages** choose your PDF once and it is stored only in this browser (IndexedDB) — pages, tables, graphs and exact text then open instantly, even offline. For *any* section, **Full text from my PDF** and **View PDF pages** (figures, tables, graphs, equations rendered as images) are read live from your own PDF through the laptop service, so no ASME text or figure is stored in this repository. Laptop setup: put `div2.mjs`, `build-div2.mjs`, the new `server.mjs` and `package.json` next to `ASME Sec VIII Div2 2025.pdf`, run `npm run div2` once (about 1–2 minutes), then restart the service.
 
 ## Deploy to Vercel
 
